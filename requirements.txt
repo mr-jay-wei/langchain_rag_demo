@@ -1,0 +1,12 @@
+langchain
+langchain-community
+langchain-openai
+# sentence-transformers 用于加载本地模型
+sentence-transformers
+# chromadb
+chromadb
+# fastembed 是一个与LangChain集成的、高效的嵌入库
+# python-dotenv 用于从.env文件加载环境变量
+python-dotenv
+# fastembed 的核心依赖库，需要显式安装
+fastembed
