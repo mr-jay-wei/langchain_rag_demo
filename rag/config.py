@@ -7,11 +7,10 @@ from typing import Dict, Any
 # 改回Hugging Face上的标准模型名称
 EMBEDDING_MODEL_NAME: str = r'../local_models/bge-small-zh-v1.5'
 RERANKER_MODEL_NAME: str = r'../local_models/bge-reranker-base/snapshots/2cfc18c9415c912f9d8155881c133215df768a70'
-
+DATA_PATH: str = "./data" 
 # 模型运行参数: 强制在CPU上运行，并设置缓存目录
+VECTOR_STORE_PATH: str = "my_chromadb_vector_store" 
 MODEL_DEVICE: str = "cpu"
-CACHE_DIR: str = "model_cache" # HuggingFaceEmbeddings会使用这个目录
-
 EMBEDDING_MODEL_KWARGS: Dict[str, Any] = {"device": MODEL_DEVICE}
 RERANKER_MODEL_KWARGS: Dict[str, Any] = {"device": MODEL_DEVICE}
 
