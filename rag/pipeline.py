@@ -1,7 +1,11 @@
 # rag/pipeline.py
 
 import os
-from typing import List, Dict, Any, Set
+import hashlib
+import time
+import glob
+from pathlib import Path
+from typing import List, Dict, Any, Set, Optional
 
 # 从 .env 文件加载环境变量，必须在访问 os.getenv 之前调用
 from dotenv import load_dotenv
@@ -124,64 +128,629 @@ class RagPipeline:
             print(f"从数据库获取源文件列表时出错: {e}")
             return set()
 
+    def _get_file_info(self, file_path: str) -> Dict[str, Any]:
+        """
+        获取文件的详细信息，包括修改时间和内容哈希。
+        
+        Args:
+            file_path: 文件路径
+            
+        Returns:
+            包含文件信息的字典
+        """
+        try:
+            stat = os.stat(file_path)
+            with open(file_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            return {
+                'path': file_path,
+                'mtime': stat.st_mtime,
+                'size': stat.st_size,
+                'hash': hashlib.md5(content.encode('utf-8')).hexdigest()
+            }
+        except Exception as e:
+            print(f"获取文件信息失败 {file_path}: {e}")
+            return None
+
+    def _get_file_metadata_from_db(self, file_path: str) -> Optional[Dict[str, Any]]:
+        """
+        从数据库中获取文件的元数据信息。
+        
+        Args:
+            file_path: 文件路径
+            
+        Returns:
+            文件的元数据信息，如果不存在则返回None
+        """
+        if not self.vector_store:
+            return None
+        
+        try:
+            # 获取该文件的所有文档块
+            all_entries = self.vector_store.get(
+                where={"source": file_path},
+                include=["metadatas"]
+            )
+            
+            if all_entries['metadatas']:
+                # 返回第一个文档块的元数据（所有块的文件信息应该相同）
+                return all_entries['metadatas'][0]
+            
+            return None
+        except Exception as e:
+            print(f"从数据库获取文件元数据失败 {file_path}: {e}")
+            return None
+
+    def _is_file_modified(self, file_path: str) -> bool:
+        """
+        检查文件是否已被修改。
+        
+        Args:
+            file_path: 文件路径
+            
+        Returns:
+            如果文件已修改返回True，否则返回False
+        """
+        current_info = self._get_file_info(file_path)
+        if not current_info:
+            return False
+        
+        db_metadata = self._get_file_metadata_from_db(file_path)
+        if not db_metadata:
+            return True  # 数据库中没有该文件，视为新文件
+        
+        # 比较文件哈希值
+        db_hash = db_metadata.get('file_hash')
+        return current_info['hash'] != db_hash
+
+    def delete_documents_by_source(self, source_path: str) -> bool:
+        """
+        根据源文件路径删除向量数据库中的相关文档。
+        
+        Args:
+            source_path: 源文件路径
+            
+        Returns:
+            删除成功返回True，否则返回False
+        """
+        if not self.vector_store:
+            print("向量数据库未初始化，无法删除文档。")
+            return False
+        
+        try:
+            # 获取该文件的所有文档ID
+            all_entries = self.vector_store.get(
+                where={"source": source_path},
+                include=["metadatas"]
+            )
+            
+            if not all_entries['ids']:
+                print(f"未找到来源为 '{source_path}' 的文档。")
+                return False
+            
+            # 删除所有相关文档
+            self.vector_store.delete(ids=all_entries['ids'])
+            print(f"已删除 {len(all_entries['ids'])} 个来源为 '{source_path}' 的文档块。")
+            return True
+            
+        except Exception as e:
+            print(f"删除文档时出错: {e}")
+            return False
+
+    def update_document(self, file_path: str) -> bool:
+        """
+        更新单个文档：先删除旧版本，再添加新版本。
+        
+        Args:
+            file_path: 文件路径
+            
+        Returns:
+            更新成功返回True，否则返回False
+        """
+        try:
+            print(f"正在更新文档: {file_path}")
+            
+            # 1. 删除旧版本
+            if not self.delete_documents_by_source(file_path):
+                print(f"删除旧版本失败: {file_path}")
+                return False
+            
+            # 2. 加载新版本
+            loader = TextLoader(file_path, encoding='utf-8')
+            new_docs = loader.load()
+            
+            # 3. 添加文件信息到元数据
+            file_info = self._get_file_info(file_path)
+            if file_info:
+                for doc in new_docs:
+                    doc.metadata.update({
+                        'file_hash': file_info['hash'],
+                        'file_mtime': file_info['mtime'],
+                        'file_size': file_info['size']
+                    })
+            
+            # 4. 分割文档
+            chunks = self.text_splitter.split_documents(new_docs)
+            
+            # 5. 生成唯一ID
+            for i, chunk in enumerate(chunks):
+                chunk_id = f"{config.DOCUMENT_ID_PREFIX}{hashlib.md5(file_path.encode()).hexdigest()}_{i}"
+                chunk.metadata['chunk_id'] = chunk_id
+            
+            # 6. 添加到数据库
+            self.vector_store.add_documents(chunks)
+            print(f"  - 已更新文档，新增 {len(chunks)} 个文本块。")
+            
+            return True
+            
+        except Exception as e:
+            print(f"更新文档时出错: {e}")
+            return False
+
+    def _get_enterprise_data_sources(self) -> Dict[str, Dict[str, Any]]:
+        """
+        获取企业级数据源配置。
+        
+        Returns:
+            数据源配置字典
+        """
+        if config.ENABLE_ENTERPRISE_MODE:
+            return {k: v for k, v in config.ENTERPRISE_DATA_SOURCES.items() if v.get('enabled', True)}
+        else:
+            # 向后兼容模式
+            return {
+                "legacy": {
+                    "path": config.DATA_PATH,
+                    "category": "general",
+                    "description": "传统数据目录",
+                    "enabled": True,
+                    "file_patterns": ["*.txt"],
+                    "priority": 1
+                }
+            }
+
+    def _scan_enterprise_files(self) -> Dict[str, List[str]]:
+        """
+        扫描企业级数据源中的所有文件。
+        
+        Returns:
+            按数据源分组的文件列表
+        """
+        data_sources = self._get_enterprise_data_sources()
+        all_files_by_source = {}
+        
+        for source_name, source_config in data_sources.items():
+            source_path = source_config['path']
+            file_patterns = source_config.get('file_patterns', ['*.txt'])
+            
+            if not os.path.exists(source_path):
+                print(f"警告: 数据源 '{source_name}' 的路径 '{source_path}' 不存在。")
+                all_files_by_source[source_name] = []
+                continue
+            
+            source_files = []
+            for pattern in file_patterns:
+                # 使用glob递归搜索文件
+                pattern_path = os.path.join(source_path, "**", pattern)
+                matched_files = glob.glob(pattern_path, recursive=True)
+                source_files.extend(matched_files)
+            
+            # 去重并规范化路径
+            source_files = list(set(os.path.normpath(f) for f in source_files))
+            all_files_by_source[source_name] = source_files
+            
+            print(f"数据源 '{source_name}' ({source_config['description']}): 发现 {len(source_files)} 个文件")
+        
+        return all_files_by_source
+
+    def _add_category_metadata(self, docs: List[Document], source_name: str, source_config: Dict[str, Any]) -> List[Document]:
+        """
+        为文档添加分类元数据。
+        
+        Args:
+            docs: 文档列表
+            source_name: 数据源名称
+            source_config: 数据源配置
+            
+        Returns:
+            添加了分类元数据的文档列表
+        """
+        for doc in docs:
+            doc.metadata.update({
+                'data_source': source_name,
+                'category': source_config['category'],
+                'description': source_config['description'],
+                'priority': source_config.get('priority', 999)
+            })
+        return docs
+
     def sync_data_directory(self):
         """
-        智能同步数据目录。自动发现新文件并将其添加到向量数据库中。
+        企业级智能同步数据目录。支持多路径、分类管理。
+        """
+        if config.ENABLE_ENTERPRISE_MODE:
+            print("--- 开始企业级智能同步 ---")
+            self._sync_enterprise_data_sources()
+        else:
+            print("--- 开始传统模式同步 ---")
+            self._sync_legacy_data_directory()
+
+    def _sync_legacy_data_directory(self):
+        """
+        传统单一数据目录同步（向后兼容）。
         """
         data_path = config.DATA_PATH
         if not os.path.exists(data_path):
             print(f"警告: 数据目录 '{data_path}' 不存在。")
             return
 
+        print("--- 开始智能同步数据目录 ---")
+        
         # 1. 获取已处理的文件列表
         processed_sources = self._get_processed_sources()
         print(f"数据库中已存在 {len(processed_sources)} 个来源的文件。")
 
         # 2. 扫描数据目录，找出所有 .txt 文件
-        all_files_in_dir = []
+        current_files = []
         for root, _, files in os.walk(data_path):
             for file in files:
                 if file.endswith(".txt"):
-                    all_files_in_dir.append(os.path.join(root, file))
+                    current_files.append(os.path.join(root, file))
         
-        # 3. 计算出需要新增的文件列表
-        new_files_to_process = [f for f in all_files_in_dir if f not in processed_sources]
-
-        if not new_files_to_process:
-            print("没有发现需要处理的新文件。")
-            return
-
-        print(f"发现 {len(new_files_to_process)} 个新文档，正在处理...")
+        print(f"当前目录中发现 {len(current_files)} 个 .txt 文件。")
         
-        # 4. 加载新文档
-        new_docs = []
-        for file_path in new_files_to_process:
-            loader = TextLoader(file_path, encoding='utf-8')
-            new_docs.extend(loader.load())
+        # 3. 分类处理文件
+        new_files = []
+        modified_files = []
+        unchanged_files = []
+        
+        for file_path in current_files:
+            if file_path not in processed_sources:
+                new_files.append(file_path)
+            elif config.ENABLE_FILE_MONITORING and self._is_file_modified(file_path):
+                modified_files.append(file_path)
+            else:
+                unchanged_files.append(file_path)
+        
+        # 4. 处理已删除的文件
+        deleted_files = []
+        if config.AUTO_DELETE_MISSING_FILES:
+            for processed_file in processed_sources:
+                if processed_file not in current_files:
+                    deleted_files.append(processed_file)
+        
+        # 5. 报告分析结果
+        print(f"文件分析结果:")
+        print(f"  - 新增文件: {len(new_files)} 个")
+        print(f"  - 修改文件: {len(modified_files)} 个")
+        print(f"  - 删除文件: {len(deleted_files)} 个")
+        print(f"  - 未变化文件: {len(unchanged_files)} 个")
+        
+        # 6. 处理删除的文件
+        if deleted_files:
+            print("\n--- 处理已删除的文件 ---")
+            for file_path in deleted_files:
+                if self.delete_documents_by_source(file_path):
+                    print(f"  ✓ 已删除: {file_path}")
+                else:
+                    print(f"  ✗ 删除失败: {file_path}")
+        
+        # 7. 处理修改的文件
+        if modified_files:
+            print("\n--- 处理已修改的文件 ---")
+            for file_path in modified_files:
+                if self.update_document(file_path):
+                    print(f"  ✓ 已更新: {file_path}")
+                else:
+                    print(f"  ✗ 更新失败: {file_path}")
+        
+        # 8. 处理新增的文件
+        if new_files:
+            print(f"\n--- 处理新增的文件 ---")
+            print(f"发现 {len(new_files)} 个新文档，正在处理...")
             
-        chunks = self.text_splitter.split_documents(new_docs)
-        print(f"  - 新文档被分割成 {len(chunks)} 个文本块。")
+            # 加载新文档
+            new_docs = []
+            for file_path in new_files:
+                try:
+                    loader = TextLoader(file_path, encoding='utf-8')
+                    docs = loader.load()
+                    
+                    # 添加文件信息到元数据
+                    file_info = self._get_file_info(file_path)
+                    if file_info:
+                        for doc in docs:
+                            doc.metadata.update({
+                                'file_hash': file_info['hash'],
+                                'file_mtime': file_info['mtime'],
+                                'file_size': file_info['size']
+                            })
+                    
+                    new_docs.extend(docs)
+                    print(f"  ✓ 已加载: {file_path}")
+                except Exception as e:
+                    print(f"  ✗ 加载失败: {file_path} - {e}")
+            
+            if new_docs:
+                chunks = self.text_splitter.split_documents(new_docs)
+                print(f"  - 新文档被分割成 {len(chunks)} 个文本块。")
 
-        # 5. 将新文档块添加到数据库
-        if self.vector_store is None:
-            # 如果数据库是空的，直接基于新文档创建
-            print("正在创建新的向量数据库...")
-            self.vector_store = Chroma.from_documents(
-                documents=chunks,
-                embedding=self.embeddings,
-                persist_directory=config.VECTOR_STORE_PATH
-            )
-            print(f"  - 新的向量数据库已创建于 '{config.VECTOR_STORE_PATH}'。")
+                # 生成唯一ID
+                for chunk in chunks:
+                    source_path = chunk.metadata.get('source', '')
+                    chunk_hash = hashlib.md5(f"{source_path}_{chunk.page_content}".encode()).hexdigest()
+                    chunk.metadata['chunk_id'] = f"{config.DOCUMENT_ID_PREFIX}{chunk_hash}"
+
+                # 添加到数据库
+                if self.vector_store is None:
+                    # 如果数据库是空的，直接基于新文档创建
+                    print("正在创建新的向量数据库...")
+                    self.vector_store = Chroma.from_documents(
+                        documents=chunks,
+                        embedding=self.embeddings,
+                        persist_directory=config.VECTOR_STORE_PATH
+                    )
+                    print(f"  - 新的向量数据库已创建于 '{config.VECTOR_STORE_PATH}'。")
+                else:
+                    # 否则，增量添加
+                    self.vector_store.add_documents(chunks)
+                    print("  - 新的文本块已成功添加到现有数据库。")
+
+        # 9. 重新构建问答链（如果有任何变化）
+        if new_files or modified_files or deleted_files:
+            print("\n--- 更新问答链 ---")
+            self._load_all_documents()  # 重新加载所有文档用于关键字检索
+            self._build_qa_chain()
+            print("问答链已更新，包含最新知识。")
         else:
-            # 否则，增量添加
-            self.vector_store.add_documents(chunks)
-            print("  - 新的文本块已成功添加到现有数据库。")
+            print("\n--- 无需更新 ---")
+            print("所有文件都是最新的，无需更新问答链。")
+        
+        print("--- 智能同步完成 ---")
 
-        # 6. 重新加载所有文档并构建问答链以包含新知识
-        print("数据同步完成，正在更新问答链...")
-        self._load_all_documents()  # 重新加载所有文档用于关键字检索
-        self._build_qa_chain()
-        print("问答链已更新，包含最新知识。")
+    def _sync_enterprise_data_sources(self):
+        """
+        企业级多数据源同步。
+        """
+        # 1. 扫描所有企业级数据源
+        all_files_by_source = self._scan_enterprise_files()
+        
+        # 2. 获取已处理的文件列表
+        processed_sources = self._get_processed_sources()
+        print(f"数据库中已存在 {len(processed_sources)} 个来源的文件。")
+        
+        # 3. 合并所有数据源的文件
+        all_current_files = []
+        for source_name, files in all_files_by_source.items():
+            all_current_files.extend(files)
+        
+        print(f"所有数据源共发现 {len(all_current_files)} 个文件。")
+        
+        # 4. 分类处理文件
+        new_files = []
+        modified_files = []
+        unchanged_files = []
+        
+        for file_path in all_current_files:
+            if file_path not in processed_sources:
+                new_files.append(file_path)
+            elif config.ENABLE_FILE_MONITORING and self._is_file_modified(file_path):
+                modified_files.append(file_path)
+            else:
+                unchanged_files.append(file_path)
+        
+        # 5. 处理已删除的文件
+        deleted_files = []
+        if config.AUTO_DELETE_MISSING_FILES:
+            for processed_file in processed_sources:
+                if processed_file not in all_current_files:
+                    deleted_files.append(processed_file)
+        
+        # 6. 报告分析结果
+        print(f"企业级文件分析结果:")
+        print(f"  - 新增文件: {len(new_files)} 个")
+        print(f"  - 修改文件: {len(modified_files)} 个")
+        print(f"  - 删除文件: {len(deleted_files)} 个")
+        print(f"  - 未变化文件: {len(unchanged_files)} 个")
+        
+        # 7. 处理删除的文件
+        if deleted_files:
+            print("\n--- 处理已删除的文件 ---")
+            for file_path in deleted_files:
+                if self.delete_documents_by_source(file_path):
+                    print(f"  ✓ 已删除: {file_path}")
+                else:
+                    print(f"  ✗ 删除失败: {file_path}")
+        
+        # 8. 处理修改的文件
+        if modified_files:
+            print("\n--- 处理已修改的文件 ---")
+            for file_path in modified_files:
+                if self._update_enterprise_document(file_path):
+                    print(f"  ✓ 已更新: {file_path}")
+                else:
+                    print(f"  ✗ 更新失败: {file_path}")
+        
+        # 9. 处理新增的文件
+        if new_files:
+            print(f"\n--- 处理新增的文件 ---")
+            self._process_new_enterprise_files(new_files, all_files_by_source)
+        
+        # 10. 重新构建问答链（如果有任何变化）
+        if new_files or modified_files or deleted_files:
+            print("\n--- 更新问答链 ---")
+            self._load_all_documents()
+            self._build_qa_chain()
+            print("问答链已更新，包含最新知识。")
+        else:
+            print("\n--- 无需更新 ---")
+            print("所有文件都是最新的，无需更新问答链。")
+        
+        print("--- 企业级智能同步完成 ---")
+
+    def _get_source_config_for_file(self, file_path: str, all_files_by_source: Dict[str, List[str]]) -> Optional[Dict[str, Any]]:
+        """
+        根据文件路径获取对应的数据源配置。
+        
+        Args:
+            file_path: 文件路径
+            all_files_by_source: 按数据源分组的文件列表
+            
+        Returns:
+            数据源配置，如果未找到则返回None
+        """
+        data_sources = self._get_enterprise_data_sources()
+        
+        for source_name, files in all_files_by_source.items():
+            if file_path in files:
+                return data_sources.get(source_name)
+        
+        return None
+
+    def _update_enterprise_document(self, file_path: str) -> bool:
+        """
+        更新企业级文档，包含分类信息。
+        
+        Args:
+            file_path: 文件路径
+            
+        Returns:
+            更新成功返回True，否则返回False
+        """
+        try:
+            print(f"正在更新企业级文档: {file_path}")
+            
+            # 1. 删除旧版本
+            if not self.delete_documents_by_source(file_path):
+                print(f"删除旧版本失败: {file_path}")
+                return False
+            
+            # 2. 获取文件对应的数据源配置
+            all_files_by_source = self._scan_enterprise_files()
+            source_config = self._get_source_config_for_file(file_path, all_files_by_source)
+            
+            if not source_config:
+                print(f"未找到文件 {file_path} 对应的数据源配置")
+                return False
+            
+            # 3. 加载新版本
+            loader = TextLoader(file_path, encoding='utf-8')
+            new_docs = loader.load()
+            
+            # 4. 添加文件信息和分类信息到元数据
+            file_info = self._get_file_info(file_path)
+            if file_info:
+                for doc in new_docs:
+                    doc.metadata.update({
+                        'file_hash': file_info['hash'],
+                        'file_mtime': file_info['mtime'],
+                        'file_size': file_info['size'],
+                        'category': source_config['category'],
+                        'data_source': source_config.get('description', ''),
+                        'priority': source_config.get('priority', 999)
+                    })
+            
+            # 5. 分割文档
+            chunks = self.text_splitter.split_documents(new_docs)
+            
+            # 6. 生成唯一ID
+            for i, chunk in enumerate(chunks):
+                chunk_id = f"{config.DOCUMENT_ID_PREFIX}{hashlib.md5(file_path.encode()).hexdigest()}_{i}"
+                chunk.metadata['chunk_id'] = chunk_id
+            
+            # 7. 添加到数据库
+            self.vector_store.add_documents(chunks)
+            print(f"  - 已更新文档，新增 {len(chunks)} 个文本块，类别: {source_config['category']}")
+            
+            return True
+            
+        except Exception as e:
+            print(f"更新企业级文档时出错: {e}")
+            return False
+
+    def _process_new_enterprise_files(self, new_files: List[str], all_files_by_source: Dict[str, List[str]]):
+        """
+        处理新增的企业级文件。
+        
+        Args:
+            new_files: 新增文件列表
+            all_files_by_source: 按数据源分组的文件列表
+        """
+        print(f"发现 {len(new_files)} 个新文档，正在处理...")
+        
+        # 按数据源分组处理新文件
+        data_sources = self._get_enterprise_data_sources()
+        files_by_category = {}
+        
+        for file_path in new_files:
+            source_config = self._get_source_config_for_file(file_path, all_files_by_source)
+            if source_config:
+                category = source_config['category']
+                if category not in files_by_category:
+                    files_by_category[category] = []
+                files_by_category[category].append((file_path, source_config))
+        
+        # 按类别处理文件
+        all_new_docs = []
+        for category, file_configs in files_by_category.items():
+            print(f"\n处理类别 '{category}' 的文件:")
+            
+            for file_path, source_config in file_configs:
+                try:
+                    loader = TextLoader(file_path, encoding='utf-8')
+                    docs = loader.load()
+                    
+                    # 添加文件信息和分类信息到元数据
+                    file_info = self._get_file_info(file_path)
+                    if file_info:
+                        for doc in docs:
+                            doc.metadata.update({
+                                'file_hash': file_info['hash'],
+                                'file_mtime': file_info['mtime'],
+                                'file_size': file_info['size'],
+                                'category': source_config['category'],
+                                'data_source': source_config.get('description', ''),
+                                'priority': source_config.get('priority', 999)
+                            })
+                    
+                    all_new_docs.extend(docs)
+                    print(f"  ✓ 已加载: {file_path} (类别: {category})")
+                except Exception as e:
+                    print(f"  ✗ 加载失败: {file_path} - {e}")
+        
+        if all_new_docs:
+            chunks = self.text_splitter.split_documents(all_new_docs)
+            print(f"\n新文档被分割成 {len(chunks)} 个文本块。")
+
+            # 生成唯一ID并添加分类信息
+            for chunk in chunks:
+                source_path = chunk.metadata.get('source', '')
+                chunk_hash = hashlib.md5(f"{source_path}_{chunk.page_content}".encode()).hexdigest()
+                chunk.metadata['chunk_id'] = f"{config.DOCUMENT_ID_PREFIX}{chunk_hash}"
+
+            # 添加到数据库
+            if self.vector_store is None:
+                print("正在创建新的向量数据库...")
+                self.vector_store = Chroma.from_documents(
+                    documents=chunks,
+                    embedding=self.embeddings,
+                    persist_directory=config.VECTOR_STORE_PATH
+                )
+                print(f"  - 新的向量数据库已创建于 '{config.VECTOR_STORE_PATH}'。")
+            else:
+                self.vector_store.add_documents(chunks)
+                print("  - 新的文本块已成功添加到现有数据库。")
+            
+            # 按类别统计
+            category_stats = {}
+            for chunk in chunks:
+                category = chunk.metadata.get('category', 'unknown')
+                category_stats[category] = category_stats.get(category, 0) + 1
+            
+            print("按类别统计:")
+            for category, count in category_stats.items():
+                print(f"  - {category}: {count} 个文本块")
 
     def _load_all_documents(self):
         """
@@ -323,6 +892,319 @@ class RagPipeline:
         else:
             print("  - 使用纯向量检索模式")
             return vector_retriever
+
+    def ask_with_categories(self, question: str, categories: List[str] = None) -> Dict[str, Any]:
+        """
+        支持分类检索的问答功能。
+        
+        Args:
+            question: 用户提出的问题字符串
+            categories: 指定检索的类别列表，None表示检索所有类别
+            
+        Returns:
+            一个字典，包含'result' (答案) 和 'source_documents' (参考的文档片段)
+        """
+        if not self.qa_chain:
+            return {
+                "result": "错误: 问答链尚未初始化。请先调用 `sync_data_directory` 方法加载文档。",
+                "source_documents": []
+            }
+        
+        # 如果没有指定类别，使用默认类别或所有类别
+        if categories is None:
+            categories = config.DEFAULT_SEARCH_CATEGORIES
+        
+        print(f"\n正在处理问题: '{question}'...")
+        if categories:
+            print(f"限定检索类别: {categories}")
+        
+        # 如果启用了问题改写功能
+        if config.ENABLE_QUERY_REWRITING:
+            print("--- 问题改写阶段 ---")
+            
+            # 1. 改写问题
+            rewritten_queries = self._rewrite_query(question)
+            
+            # 2. 使用多个问题进行分类检索
+            print("--- 多查询分类检索阶段 ---")
+            retrieved_docs = self._retrieve_with_multiple_queries_and_categories(rewritten_queries, categories)
+            
+            # 3. 重排序
+            print("--- 重排序阶段 ---")
+            if retrieved_docs and self.reranker:
+                try:
+                    reranked_docs = self.reranker.compress_documents(retrieved_docs, question)
+                    final_docs = reranked_docs[:config.RERANKER_TOP_N]
+                    print(f"  - 重排序完成，最终选择 {len(final_docs)} 个最相关文档")
+                except Exception as e:
+                    print(f"  - 重排序失败: {e}，使用原始检索结果")
+                    final_docs = retrieved_docs[:config.RERANKER_TOP_N]
+            else:
+                final_docs = retrieved_docs[:config.RERANKER_TOP_N]
+            
+            # 4. 生成答案
+            print("--- 答案生成阶段 ---")
+            if final_docs:
+                # 构建上下文
+                context = "\n\n".join([doc.page_content for doc in final_docs])
+                
+                # 使用自定义提示模板生成答案
+                prompt_template = """
+请你扮演一个严谨的文档问答机器人。
+请严格根据下面提供的"上下文信息"来回答"问题"。
+如果上下文中没有足够的信息来回答问题，请直接说："根据提供的资料，我无法回答该问题。"
+不允许编造或添加上下文之外的任何信息。
+
+---
+上下文信息:
+{context}
+---
+
+问题: {question}
+
+回答:
+"""
+                
+                prompt = prompt_template.format(context=context, question=question)
+                response = self.llm.invoke(prompt)
+                
+                if hasattr(response, 'content'):
+                    answer = response.content.strip()
+                else:
+                    answer = str(response).strip()
+                
+                return {
+                    "result": answer,
+                    "source_documents": final_docs
+                }
+            else:
+                return {
+                    "result": "根据提供的资料，我无法找到相关信息来回答该问题。",
+                    "source_documents": []
+                }
+        else:
+            # 使用分类检索的问答链
+            if categories:
+                # 创建临时的分类检索器
+                category_retriever = self._build_category_retriever(categories)
+                compression_retriever = ContextualCompressionRetriever(
+                    base_compressor=self.reranker,
+                    base_retriever=category_retriever
+                )
+                
+                # 临时创建问答链
+                from langchain.chains import RetrievalQA
+                from langchain_core.prompts import PromptTemplate
+                
+                prompt_template = """
+请你扮演一个严谨的文档问答机器人。
+请严格根据下面提供的"上下文信息"来回答"问题"。
+如果上下文中没有足够的信息来回答问题，请直接说："根据提供的资料，我无法回答该问题。"
+不允许编造或添加上下文之外的任何信息。
+
+---
+上下文信息:
+{context}
+---
+
+问题: {question}
+
+回答:
+"""
+                QA_CHAIN_PROMPT = PromptTemplate.from_template(prompt_template)
+                
+                temp_qa_chain = RetrievalQA.from_chain_type(
+                    llm=self.llm,
+                    chain_type="stuff",
+                    retriever=compression_retriever,
+                    chain_type_kwargs={"prompt": QA_CHAIN_PROMPT},
+                    return_source_documents=True
+                )
+                
+                result = temp_qa_chain.invoke({"query": question})
+                return result
+            else:
+                # 使用原始的问答链
+                result = self.qa_chain.invoke({"query": question})
+                return result
+
+    def _retrieve_with_multiple_queries_and_categories(self, queries: List[str], categories: List[str] = None) -> List[Document]:
+        """
+        使用多个查询问题进行分类检索，并合并结果。
+        
+        Args:
+            queries: 查询问题列表
+            categories: 指定检索的类别列表
+            
+        Returns:
+            合并后的文档列表
+        """
+        all_documents = []
+        seen_contents = set()
+        
+        for i, query in enumerate(queries):
+            print(f"  - 执行查询 {i+1}: {query}")
+            
+            try:
+                # 使用分类检索器进行检索
+                if categories:
+                    category_retriever = self._build_category_retriever(categories)
+                else:
+                    category_retriever = self._build_hybrid_retriever()
+                
+                # 为改写的查询使用较少的检索数量
+                if i == 0:
+                    k = config.RETRIEVER_TOP_K
+                else:
+                    k = config.REWRITE_QUERY_TOP_K
+                
+                # 临时调整检索器的k值
+                if hasattr(category_retriever, 'retrievers'):
+                    for retriever in category_retriever.retrievers:
+                        if hasattr(retriever, 'search_kwargs'):
+                            retriever.search_kwargs['k'] = k
+                        elif hasattr(retriever, 'k'):
+                            retriever.k = k
+                
+                docs = category_retriever.get_relevant_documents(query)
+                
+                # 去重处理
+                for doc in docs:
+                    content_hash = hash(doc.page_content)
+                    if config.ENABLE_DOCUMENT_DEDUPLICATION:
+                        if content_hash not in seen_contents:
+                            all_documents.append(doc)
+                            seen_contents.add(content_hash)
+                    else:
+                        all_documents.append(doc)
+                        
+                print(f"    检索到 {len(docs)} 个文档")
+                
+            except Exception as e:
+                print(f"    查询执行失败: {e}")
+                continue
+        
+        print(f"  - 多查询分类检索完成，共获得 {len(all_documents)} 个文档")
+        return all_documents
+
+    def _build_category_retriever(self, categories: List[str]):
+        """
+        构建分类检索器，只检索指定类别的文档。
+        
+        Args:
+            categories: 类别列表
+            
+        Returns:
+            分类检索器
+        """
+        if not categories:
+            return self._build_hybrid_retriever()
+        
+        # 过滤指定类别的文档
+        category_documents = []
+        for doc in self.all_documents:
+            doc_category = doc.metadata.get('category', 'general')
+            if doc_category in categories:
+                category_documents.append(doc)
+        
+        print(f"  - 分类过滤: 从 {len(self.all_documents)} 个文档中筛选出 {len(category_documents)} 个指定类别的文档")
+        
+        if not category_documents:
+            print("  - 警告: 指定类别中没有找到文档")
+            return self._build_hybrid_retriever()
+        
+        # 创建临时向量存储（仅包含指定类别的文档）
+        try:
+            temp_vector_store = Chroma.from_documents(
+                documents=category_documents,
+                embedding=self.embeddings
+            )
+            
+            vector_retriever = temp_vector_store.as_retriever(
+                search_type="similarity",
+                search_kwargs={"k": config.RETRIEVER_TOP_K}
+            )
+            
+            # 如果启用混合检索，还需要创建分类BM25检索器
+            if config.ENABLE_HYBRID_SEARCH:
+                try:
+                    def preprocess_func(text: str) -> List[str]:
+                        return list(jieba.cut(text))
+                    
+                    category_bm25_retriever = BM25Retriever.from_documents(
+                        category_documents,
+                        preprocess_func=preprocess_func
+                    )
+                    category_bm25_retriever.k = config.KEYWORD_RETRIEVER_TOP_K
+                    
+                    # 创建混合检索器
+                    ensemble_retriever = EnsembleRetriever(
+                        retrievers=[vector_retriever, category_bm25_retriever],
+                        weights=[config.VECTOR_SEARCH_WEIGHT, config.KEYWORD_SEARCH_WEIGHT]
+                    )
+                    
+                    print(f"  - 分类混合检索器构建完成")
+                    return ensemble_retriever
+                    
+                except Exception as e:
+                    print(f"  - 分类BM25检索器构建失败: {e}，使用纯向量检索")
+                    return vector_retriever
+            else:
+                return vector_retriever
+                
+        except Exception as e:
+            print(f"  - 分类检索器构建失败: {e}，使用全局检索器")
+            return self._build_hybrid_retriever()
+
+    def get_available_categories(self) -> Dict[str, int]:
+        """
+        获取知识库中可用的类别及其文档数量。
+        
+        Returns:
+            类别名称到文档数量的映射
+        """
+        if not self.all_documents:
+            return {}
+        
+        category_counts = {}
+        for doc in self.all_documents:
+            category = doc.metadata.get('category', 'general')
+            category_counts[category] = category_counts.get(category, 0) + 1
+        
+        return category_counts
+
+    def get_data_source_info(self) -> Dict[str, Dict[str, Any]]:
+        """
+        获取数据源信息统计。
+        
+        Returns:
+            数据源信息字典
+        """
+        if not self.all_documents:
+            return {}
+        
+        source_info = {}
+        for doc in self.all_documents:
+            category = doc.metadata.get('category', 'general')
+            data_source = doc.metadata.get('data_source', 'unknown')
+            
+            if category not in source_info:
+                source_info[category] = {
+                    'count': 0,
+                    'sources': set(),
+                    'description': doc.metadata.get('description', ''),
+                    'priority': doc.metadata.get('priority', 999)
+                }
+            
+            source_info[category]['count'] += 1
+            if data_source != 'unknown':
+                source_info[category]['sources'].add(data_source)
+        
+        # 转换set为list以便JSON序列化
+        for category in source_info:
+            source_info[category]['sources'] = list(source_info[category]['sources'])
+        
+        return source_info
 
     def _rewrite_query(self, original_query: str) -> List[str]:
         """

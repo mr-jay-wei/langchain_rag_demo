@@ -11,6 +11,9 @@
 -   [x] **智能化增量同步**: 系统能够自动扫描指定的数据目录 (`data`)，智能识别并处理新增的文档，实现知识库的轻松、高效维护。
 -   [x] **混合检索技术**: 创新性地结合向量检索和关键字检索（BM25），通过 `EnsembleRetriever` 实现混合检索，显著提升召回率和检索准确性。
 -   [x] **智能问题改写**: 自动将用户问题改写成多个相关问题，从不同角度进行检索，大幅提升搜索覆盖面和信息召回率。
+-   [x] **智能知识库管理**: 支持文件的增删改查，自动检测文件变化，实现知识库的智能同步和版本管理。
+-   [x] **企业级多路径支持**: 支持多个硬盘/目录作为数据源，灵活配置不同存储位置的文档，满足企业级存储需求。
+-   [x] **智能分类管理**: 支持按类别组织和检索文档，可以指定特定类别进行精准搜索，提高检索效率和准确性。
 -   [x] **高度模块化与可扩展**: 项目遵循高内聚、低耦合的设计原则。更换LLM（如从Kimi切换到DeepSeek）、向量数据库或模型都无需改动核心逻辑。
 -   [x] **健壮的工程实践**: 代码结构清晰，配置、核心逻辑、执行入口分离。包含了完善的错误处理和时序安全逻辑，确保在各种场景下都能稳定运行。
 -   [x] **现代化的工具链**: 全程使用 `uv` 进行包和虚拟环境管理，体验极致的开发效率。
@@ -128,6 +131,30 @@ python test_query_rewriting.py
 python test_query_rewriting.py compare
 ```
 该脚本会对比启用和禁用问题改写功能的效果差异。
+
+#### 知识库管理功能测试
+```bash
+python test_knowledge_management.py
+```
+该脚本会：
+- 测试文件的增加、修改、删除操作
+- 验证智能同步功能的效果
+- 展示知识库版本管理能力
+
+#### 手动知识库管理
+```bash
+python test_knowledge_management.py manual
+```
+提供交互式的知识库管理界面，支持手动操作文档。
+
+#### 企业级多路径和分类管理测试
+```bash
+python test_enterprise_features.py
+```
+该脚本会：
+- 测试多数据源路径配置
+- 验证分类管理和检索功能
+- 展示企业级存储架构的优势
 
 ---
 
@@ -457,6 +484,540 @@ ENABLE_DOCUMENT_DEDUPLICATION = True
 - ✅ **信息更全面**: 从多个角度获取信息
 - ✅ **答案更详细**: 提供更完整的回答
 - ✅ **覆盖面更广**: 包含应用场景、优势对比等
+
+---
+
+## 智能知识库管理功能详解
+
+### 🎯 功能概述
+
+智能知识库管理是我们RAG系统的重要创新功能，它提供了完整的文档生命周期管理：
+
+- **自动文件监控**: 实时检测文件的增加、修改、删除
+- **智能同步机制**: 自动更新向量数据库中的文档内容
+- **版本管理**: 基于文件哈希值的精确变更检测
+- **批量操作**: 支持批量文件的增删改查操作
+
+### ⚙️ 配置参数
+
+在 `rag/config.py` 中可以调整以下知识库管理参数：
+
+```python
+# 知识库管理功能开关
+ENABLE_FILE_MONITORING = True  # True: 启用文件监控, False: 禁用
+
+# 文件修改时间检查间隔(秒)
+FILE_CHECK_INTERVAL = 1
+
+# 是否在同步时自动删除不存在的文件对应的文档
+AUTO_DELETE_MISSING_FILES = True
+
+# 文档ID前缀，用于标识文档块的来源文件
+DOCUMENT_ID_PREFIX = "doc_"
+```
+
+### 🔄 工作流程
+
+智能知识库管理的完整工作流程：
+
+1. **文件扫描**: 扫描数据目录中的所有文档文件
+2. **变更检测**: 通过文件哈希值检测文件是否发生变化
+3. **分类处理**: 将文件分为新增、修改、删除、未变化四类
+4. **批量操作**: 对不同类型的文件执行相应的操作
+5. **数据库更新**: 更新向量数据库中的文档内容
+6. **索引重建**: 重新构建检索索引和问答链
+
+### 📁 文件操作类型
+
+#### 1. 新增文件处理
+- **检测机制**: 文件路径不在数据库记录中
+- **处理流程**: 
+  1. 加载文档内容
+  2. 添加文件元数据（哈希值、修改时间、大小）
+  3. 文档分块处理
+  4. 生成唯一文档ID
+  5. 添加到向量数据库
+
+#### 2. 修改文件处理
+- **检测机制**: 文件哈希值与数据库记录不一致
+- **处理流程**:
+  1. 删除旧版本的所有文档块
+  2. 重新加载文档内容
+  3. 更新文件元数据
+  4. 重新分块和向量化
+  5. 添加新版本到数据库
+
+#### 3. 删除文件处理
+- **检测机制**: 数据库中存在但文件系统中不存在
+- **处理流程**:
+  1. 查找该文件的所有文档块
+  2. 从向量数据库中删除所有相关记录
+  3. 清理相关索引
+
+#### 4. 未变化文件
+- **检测机制**: 文件哈希值与数据库记录一致
+- **处理结果**: 跳过处理，保持现状
+
+### 🛠️ 核心API方法
+
+#### 文件信息获取
+```python
+def _get_file_info(self, file_path: str) -> Dict[str, Any]:
+    """获取文件的详细信息，包括修改时间和内容哈希"""
+```
+
+#### 变更检测
+```python
+def _is_file_modified(self, file_path: str) -> bool:
+    """检查文件是否已被修改"""
+```
+
+#### 文档删除
+```python
+def delete_documents_by_source(self, source_path: str) -> bool:
+    """根据源文件路径删除向量数据库中的相关文档"""
+```
+
+#### 文档更新
+```python
+def update_document(self, file_path: str) -> bool:
+    """更新单个文档：先删除旧版本，再添加新版本"""
+```
+
+#### 智能同步
+```python
+def sync_data_directory(self):
+    """智能同步数据目录，处理所有文件变更"""
+```
+
+### 📊 同步过程示例
+
+#### 典型同步输出
+```
+--- 开始智能同步数据目录 ---
+数据库中已存在 5 个来源的文件。
+当前目录中发现 7 个 .txt 文件。
+
+文件分析结果:
+  - 新增文件: 2 个
+  - 修改文件: 1 个
+  - 删除文件: 1 个
+  - 未变化文件: 3 个
+
+--- 处理已删除的文件 ---
+  ✓ 已删除: old_document.txt
+
+--- 处理已修改的文件 ---
+正在更新文档: updated_document.txt
+  - 已更新文档，新增 3 个文本块。
+  ✓ 已更新: updated_document.txt
+
+--- 处理新增的文件 ---
+发现 2 个新文档，正在处理...
+  ✓ 已加载: new_document1.txt
+  ✓ 已加载: new_document2.txt
+  - 新文档被分割成 5 个文本块。
+  - 新的文本块已成功添加到现有数据库。
+
+--- 更新问答链 ---
+问答链已更新，包含最新知识。
+--- 智能同步完成 ---
+```
+
+### 🧪 测试功能
+
+#### 自动化测试
+```bash
+# 运行完整的知识库管理测试
+python test_knowledge_management.py
+```
+
+测试脚本会模拟以下场景：
+1. **阶段1**: 添加初始测试文件
+2. **阶段2**: 修改现有文件内容
+3. **阶段3**: 添加新文件
+4. **阶段4**: 删除文件
+5. **阶段5**: 综合操作测试
+
+#### 手动管理界面
+```bash
+# 启动交互式管理界面
+python test_knowledge_management.py manual
+```
+
+提供以下功能：
+- 查看当前文档列表
+- 手动删除指定文档
+- 手动更新指定文档
+- 执行同步操作
+- 测试查询功能
+
+### 🔧 高级特性
+
+#### 1. 文件完整性验证
+- 使用MD5哈希值确保文件内容的完整性
+- 检测文件是否被意外修改或损坏
+
+#### 2. 批量操作优化
+- 批量处理多个文件变更，提高效率
+- 智能合并数据库操作，减少I/O开销
+
+#### 3. 错误恢复机制
+- 单个文件处理失败不影响其他文件
+- 详细的错误日志和状态报告
+
+#### 4. 元数据管理
+- 存储文件的详细元数据信息
+- 支持基于元数据的高级查询和过滤
+
+### 📈 性能优势
+
+#### 效率提升
+- **增量更新**: 只处理变更的文件，避免全量重建
+- **智能检测**: 基于哈希值的精确变更检测
+- **批量操作**: 优化的批量处理机制
+
+#### 可靠性保障
+- **事务性操作**: 确保数据库操作的一致性
+- **错误隔离**: 单个文件错误不影响整体同步
+- **状态追踪**: 详细的操作日志和状态报告
+
+### 🎉 实际应用场景
+
+#### 1. 文档维护场景
+```
+场景: 技术文档定期更新
+操作: 修改API文档内容
+结果: 系统自动检测变更，更新向量数据库，用户查询立即获得最新信息
+```
+
+#### 2. 知识库扩展场景
+```
+场景: 添加新的产品说明文档
+操作: 将新文档放入data目录
+结果: 系统自动加载新文档，扩展知识库覆盖范围
+```
+
+#### 3. 内容清理场景
+```
+场景: 删除过时的文档
+操作: 从data目录删除文件
+结果: 系统自动清理相关向量数据，避免过时信息干扰
+```
+
+### 🔮 未来增强
+
+1. **实时监控**: 基于文件系统事件的实时监控
+2. **版本历史**: 保留文档的历史版本信息
+3. **冲突解决**: 处理并发修改的冲突情况
+4. **备份恢复**: 自动备份和恢复机制
+
+---
+
+## 企业级多路径和分类管理功能详解
+
+### 🏢 功能概述
+
+企业级多路径和分类管理是我们RAG系统的重要企业级功能，专为大型组织的复杂文档管理需求而设计：
+
+- **多硬盘支持**: 支持配置多个硬盘/目录作为数据源
+- **分类组织**: 按业务类别组织文档，如技术文档、产品文档、研究报告等
+- **精准检索**: 支持指定类别进行检索，提高查询效率和准确性
+- **灵活配置**: 每个数据源可独立配置路径、类别、优先级等属性
+
+### ⚙️ 企业级配置
+
+在 `rag/config.py` 中可以配置多个数据源：
+
+```python
+# 启用企业级多路径模式
+ENABLE_ENTERPRISE_MODE = True
+
+# 企业级多路径数据源配置
+ENTERPRISE_DATA_SOURCES = {
+    # 主数据目录
+    "main": {
+        "path": "./data",
+        "category": "general",
+        "description": "通用知识库",
+        "enabled": True,
+        "file_patterns": ["*.txt", "*.md", "*.pdf"],
+        "priority": 1
+    },
+    
+    # 技术文档目录
+    "technical": {
+        "path": "./data/technical",
+        "category": "technical", 
+        "description": "技术文档库",
+        "enabled": True,
+        "file_patterns": ["*.txt", "*.md"],
+        "priority": 2
+    },
+    
+    # 不同硬盘的示例配置
+    "disk_d": {
+        "path": "D:/enterprise_docs",
+        "category": "enterprise",
+        "description": "企业文档库(D盘)",
+        "enabled": True,
+        "file_patterns": ["*.txt", "*.md", "*.pdf"],
+        "priority": 4
+    }
+}
+
+# 默认检索的类别
+DEFAULT_SEARCH_CATEGORIES = []  # 空列表表示检索所有类别
+```
+
+### 🗂️ 数据源配置详解
+
+#### 配置参数说明
+
+| 参数 | 类型 | 说明 | 示例 |
+|------|------|------|------|
+| **path** | string | 数据源路径，支持相对路径和绝对路径 | `"./data"`, `"D:/docs"` |
+| **category** | string | 文档类别标识，用于分类检索 | `"technical"`, `"product"` |
+| **description** | string | 数据源描述信息 | `"技术文档库"` |
+| **enabled** | boolean | 是否启用该数据源 | `true`, `false` |
+| **file_patterns** | array | 支持的文件格式模式 | `["*.txt", "*.md", "*.pdf"]` |
+| **priority** | integer | 优先级，数字越小优先级越高 | `1`, `2`, `3` |
+
+#### 典型企业配置示例
+
+```python
+ENTERPRISE_DATA_SOURCES = {
+    # 通用文档 - 本地SSD
+    "general": {
+        "path": "./data/general",
+        "category": "general",
+        "description": "通用知识库",
+        "enabled": True,
+        "file_patterns": ["*.txt", "*.md"],
+        "priority": 1
+    },
+    
+    # 技术文档 - 高速存储
+    "technical": {
+        "path": "/mnt/ssd/technical_docs",
+        "category": "technical",
+        "description": "技术文档库(SSD)",
+        "enabled": True,
+        "file_patterns": ["*.txt", "*.md", "*.rst"],
+        "priority": 2
+    },
+    
+    # 产品文档 - 网络存储
+    "product": {
+        "path": "/mnt/nas/product_docs",
+        "category": "product", 
+        "description": "产品文档库(NAS)",
+        "enabled": True,
+        "file_patterns": ["*.txt", "*.md", "*.docx"],
+        "priority": 3
+    },
+    
+    # 研究报告 - 归档存储
+    "research": {
+        "path": "/mnt/archive/research",
+        "category": "research",
+        "description": "研究报告库(归档)",
+        "enabled": True,
+        "file_patterns": ["*.txt", "*.md", "*.pdf"],
+        "priority": 4
+    }
+}
+```
+
+### 🔍 分类检索功能
+
+#### 基本分类检索
+
+```python
+# 查询所有类别
+result = rag_pipeline.ask("什么是人工智能？")
+
+# 只在技术文档中查询
+result = rag_pipeline.ask_with_categories(
+    "API接口如何使用？", 
+    categories=["technical"]
+)
+
+# 在多个类别中查询
+result = rag_pipeline.ask_with_categories(
+    "产品架构设计", 
+    categories=["technical", "product"]
+)
+```
+
+#### 高级分类检索
+
+```python
+# 获取可用类别
+categories = rag_pipeline.get_available_categories()
+print(f"可用类别: {categories}")
+# 输出: {'general': 15, 'technical': 23, 'product': 18}
+
+# 获取数据源详细信息
+source_info = rag_pipeline.get_data_source_info()
+for category, info in source_info.items():
+    print(f"{category}: {info['count']} 个文档")
+```
+
+### 📊 企业级应用场景
+
+#### 1. 大型企业文档管理
+```
+场景: 跨国公司有多个部门的文档分布在不同存储系统
+配置: 
+- 技术部门文档 → 本地高速SSD
+- 产品部门文档 → 网络共享存储
+- 法务部门文档 → 安全隔离存储
+- 历史归档文档 → 冷存储系统
+
+优势: 统一检索界面，分类精准查询，性能优化
+```
+
+#### 2. 研发团队知识管理
+```
+场景: 研发团队需要快速查找技术文档和API说明
+配置:
+- API文档 → technical类别
+- 架构设计 → technical类别  
+- 产品需求 → product类别
+- 用户反馈 → general类别
+
+优势: 技术人员可以只在technical类别中搜索，避免无关信息干扰
+```
+
+#### 3. 客服支持系统
+```
+场景: 客服需要快速找到产品使用说明和常见问题解答
+配置:
+- 产品手册 → product类别
+- 常见问题 → support类别
+- 技术规格 → technical类别
+
+优势: 客服可以按问题类型精准检索，提高响应速度
+```
+
+### 🛠️ 实际部署配置
+
+#### Windows环境示例
+```python
+ENTERPRISE_DATA_SOURCES = {
+    "main": {
+        "path": "C:/CompanyDocs/General",
+        "category": "general",
+        "description": "通用文档(C盘)",
+        "enabled": True,
+        "file_patterns": ["*.txt", "*.docx"],
+        "priority": 1
+    },
+    "technical": {
+        "path": "D:/TechDocs",
+        "category": "technical", 
+        "description": "技术文档(D盘)",
+        "enabled": True,
+        "file_patterns": ["*.md", "*.rst", "*.txt"],
+        "priority": 2
+    },
+    "archive": {
+        "path": "E:/Archive",
+        "category": "archive",
+        "description": "归档文档(E盘)",
+        "enabled": False,  # 可以临时禁用
+        "file_patterns": ["*.pdf", "*.txt"],
+        "priority": 5
+    }
+}
+```
+
+#### Linux环境示例
+```python
+ENTERPRISE_DATA_SOURCES = {
+    "local": {
+        "path": "/opt/knowledge_base/local",
+        "category": "general",
+        "description": "本地知识库",
+        "enabled": True,
+        "file_patterns": ["*.txt", "*.md"],
+        "priority": 1
+    },
+    "shared": {
+        "path": "/mnt/shared/docs",
+        "category": "shared",
+        "description": "共享文档库",
+        "enabled": True,
+        "file_patterns": ["*.txt", "*.md", "*.pdf"],
+        "priority": 2
+    },
+    "backup": {
+        "path": "/backup/knowledge",
+        "category": "backup",
+        "description": "备份知识库",
+        "enabled": True,
+        "file_patterns": ["*.txt"],
+        "priority": 3
+    }
+}
+```
+
+### 🧪 测试和验证
+
+#### 功能测试脚本
+```bash
+# 运行企业级功能测试
+python test_enterprise_features.py
+```
+
+测试脚本会验证：
+- ✅ 多数据源路径扫描
+- ✅ 分类文档加载和处理
+- ✅ 分类检索功能
+- ✅ 跨类别查询能力
+- ✅ 数据源管理功能
+
+#### 性能优化建议
+
+1. **存储层次化**
+   - 高频访问文档 → SSD存储
+   - 中频访问文档 → 机械硬盘
+   - 低频访问文档 → 网络存储
+
+2. **类别优先级设置**
+   - 核心业务文档设置高优先级
+   - 归档文档设置低优先级
+   - 根据查询频率调整权重
+
+3. **文件格式优化**
+   - 纯文本文档处理速度最快
+   - PDF文档需要额外解析时间
+   - 根据需求选择合适的文件格式
+
+### 📈 企业级优势
+
+#### 存储灵活性
+- ✅ **多硬盘支持**: 充分利用企业现有存储资源
+- ✅ **路径灵活配置**: 支持本地、网络、云存储等多种路径
+- ✅ **动态启用/禁用**: 可以临时禁用某些数据源
+
+#### 检索精准性
+- ✅ **分类精准检索**: 避免无关信息干扰
+- ✅ **多类别组合**: 支持跨类别综合查询
+- ✅ **优先级控制**: 重要文档优先展示
+
+#### 管理便捷性
+- ✅ **统一管理界面**: 一个系统管理多个数据源
+- ✅ **自动同步**: 各数据源文件变更自动检测
+- ✅ **分类统计**: 清晰的数据源和类别统计信息
+
+### 🔮 扩展可能性
+
+1. **权限管理**: 不同用户访问不同类别的文档
+2. **负载均衡**: 多个数据源的查询负载分配
+3. **缓存策略**: 热点文档的智能缓存
+4. **监控告警**: 数据源状态监控和异常告警
 
 ---
 

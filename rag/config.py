@@ -7,12 +7,85 @@ from typing import Dict, Any
 # 改回Hugging Face上的标准模型名称
 EMBEDDING_MODEL_NAME: str = r'../local_models/bge-small-zh-v1.5'
 RERANKER_MODEL_NAME: str = r'../local_models/bge-reranker-base/snapshots/2cfc18c9415c912f9d8155881c133215df768a70'
-DATA_PATH: str = "./data" 
+
 # 模型运行参数: 强制在CPU上运行，并设置缓存目录
 VECTOR_STORE_PATH: str = "my_chromadb_vector_store" 
 MODEL_DEVICE: str = "cpu"
 EMBEDDING_MODEL_KWARGS: Dict[str, Any] = {"device": MODEL_DEVICE}
 RERANKER_MODEL_KWARGS: Dict[str, Any] = {"device": MODEL_DEVICE}
+
+# --- 企业级多路径数据源配置 ---
+
+# 传统单一数据路径（向后兼容）
+DATA_PATH: str = "./data"
+
+# 企业级多路径数据源配置
+# 支持多个硬盘/目录，每个路径可以指定类别
+ENTERPRISE_DATA_SOURCES: Dict[str, Dict[str, Any]] = {
+    # 主数据目录
+    "main": {
+        "path": "./data",
+        "category": "general",
+        "description": "通用知识库",
+        "enabled": True,
+        "file_patterns": ["*.txt", "*.md", "*.pdf"],
+        "priority": 1
+    },
+    
+    # 技术文档目录
+    "technical": {
+        "path": "./data/technical",
+        "category": "technical",
+        "description": "技术文档库",
+        "enabled": True,
+        "file_patterns": ["*.txt", "*.md"],
+        "priority": 2
+    },
+    
+    # 产品文档目录
+    "product": {
+        "path": "./data/product",
+        "category": "product",
+        "description": "产品文档库",
+        "enabled": True,
+        "file_patterns": ["*.txt", "*.md"],
+        "priority": 3
+    },
+    
+    # 可以添加更多数据源，比如不同硬盘的路径
+    # "disk_d": {
+    #     "path": "D:/enterprise_docs",
+    #     "category": "enterprise",
+    #     "description": "企业文档库(D盘)",
+    #     "enabled": True,
+    #     "file_patterns": ["*.txt", "*.md", "*.pdf"],
+    #     "priority": 4
+    # },
+    
+    # "disk_e": {
+    #     "path": "E:/research_docs",
+    #     "category": "research",
+    #     "description": "研究文档库(E盘)",
+    #     "enabled": True,
+    #     "file_patterns": ["*.txt", "*.md"],
+    #     "priority": 5
+    # }
+}
+
+# 是否启用企业级多路径模式
+ENABLE_ENTERPRISE_MODE: bool = True
+
+# 默认检索的类别（空列表表示检索所有类别）
+DEFAULT_SEARCH_CATEGORIES: list = []  # 例如: ["technical", "product"]
+
+# 类别优先级（数字越小优先级越高）
+CATEGORY_PRIORITIES: Dict[str, int] = {
+    "general": 1,
+    "technical": 2,
+    "product": 3,
+    "enterprise": 4,
+    "research": 5
+}
 
 
 # --- 文档处理配置 ---
@@ -54,3 +127,17 @@ REWRITE_QUERY_TOP_K: int = 5
 
 # 是否在最终结果中去重相似文档
 ENABLE_DOCUMENT_DEDUPLICATION: bool = True
+
+# --- 知识库管理配置 ---
+
+# 是否启用智能文件监控和更新
+ENABLE_FILE_MONITORING: bool = True
+
+# 文件修改时间检查间隔(秒)，用于检测文件是否被修改
+FILE_CHECK_INTERVAL: int = 1
+
+# 是否在同步时自动删除不存在的文件对应的文档
+AUTO_DELETE_MISSING_FILES: bool = True
+
+# 文档ID前缀，用于标识文档块的来源文件
+DOCUMENT_ID_PREFIX: str = "doc_"
