@@ -40,3 +40,17 @@ RERANKER_TOP_N: int = 3
 
 # 是否启用混合检索 (True: 混合检索, False: 仅向量检索)
 ENABLE_HYBRID_SEARCH: bool = True
+
+# --- 问题改写配置 ---
+
+# 是否启用问题改写功能
+ENABLE_QUERY_REWRITING: bool = True
+
+# 问题改写数量: 将原问题改写成多少个相关问题
+QUERY_REWRITE_COUNT: int = 3
+
+# 问题改写时每个改写问题的检索数量
+REWRITE_QUERY_TOP_K: int = 5
+
+# 是否在最终结果中去重相似文档
+ENABLE_DOCUMENT_DEDUPLICATION: bool = True

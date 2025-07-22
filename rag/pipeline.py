@@ -324,9 +324,138 @@ class RagPipeline:
             print("  - 使用纯向量检索模式")
             return vector_retriever
 
+    def _rewrite_query(self, original_query: str) -> List[str]:
+        """
+        将原始问题改写成多个相关问题，提高搜索覆盖面。
+        
+        Args:
+            original_query: 用户的原始问题
+            
+        Returns:
+            包含原始问题和改写问题的列表
+        """
+        if not config.ENABLE_QUERY_REWRITING:
+            return [original_query]
+        
+        try:
+            # 构建问题改写的提示模板
+            rewrite_prompt = PromptTemplate.from_template("""
+你是一个专业的问题改写助手。请将用户的问题改写成{count}个不同角度但相关的问题，以提高信息检索的覆盖面。
+
+要求：
+1. 保持问题的核心意图不变
+2. 从不同角度或层面来表达同一个需求
+3. 使用不同的关键词和表达方式
+4. 每个问题都应该是完整、清晰的
+5. 问题之间要有一定的差异性
+
+原始问题：{original_query}
+
+请生成{count}个改写问题，每行一个问题，不要添加编号或其他格式：
+""")
+            
+            # 调用LLM进行问题改写
+            prompt = rewrite_prompt.format(
+                original_query=original_query,
+                count=config.QUERY_REWRITE_COUNT
+            )
+            
+            response = self.llm.invoke(prompt)
+            
+            # 解析改写结果
+            rewritten_queries = []
+            if hasattr(response, 'content'):
+                content = response.content.strip()
+            else:
+                content = str(response).strip()
+            
+            # 分割并清理改写的问题
+            lines = [line.strip() for line in content.split('\n') if line.strip()]
+            for line in lines:
+                # 移除可能的编号格式
+                cleaned_line = line
+                if line and (line[0].isdigit() or line.startswith('-') or line.startswith('•')):
+                    # 移除编号和标点
+                    cleaned_line = line.split('.', 1)[-1].strip()
+                    cleaned_line = cleaned_line.lstrip('- •').strip()
+                
+                if cleaned_line and cleaned_line not in rewritten_queries:
+                    rewritten_queries.append(cleaned_line)
+            
+            # 确保包含原始问题
+            all_queries = [original_query]
+            all_queries.extend(rewritten_queries[:config.QUERY_REWRITE_COUNT])
+            
+            print(f"  - 问题改写完成，生成了 {len(all_queries)} 个查询问题")
+            for i, query in enumerate(all_queries):
+                print(f"    [{i+1}] {query}")
+            
+            return all_queries
+            
+        except Exception as e:
+            print(f"问题改写失败: {e}")
+            return [original_query]
+
+    def _retrieve_with_multiple_queries(self, queries: List[str]) -> List[Document]:
+        """
+        使用多个查询问题进行检索，并合并结果。
+        
+        Args:
+            queries: 查询问题列表
+            
+        Returns:
+            合并后的文档列表
+        """
+        all_documents = []
+        seen_contents = set()  # 用于去重
+        
+        for i, query in enumerate(queries):
+            print(f"  - 执行查询 {i+1}: {query}")
+            
+            try:
+                # 使用混合检索器进行检索
+                hybrid_retriever = self._build_hybrid_retriever()
+                
+                # 为改写的查询使用较少的检索数量
+                if i == 0:  # 原始查询使用正常数量
+                    k = config.RETRIEVER_TOP_K
+                else:  # 改写查询使用较少数量
+                    k = config.REWRITE_QUERY_TOP_K
+                
+                # 临时调整检索器的k值
+                if hasattr(hybrid_retriever, 'retrievers'):
+                    # EnsembleRetriever
+                    for retriever in hybrid_retriever.retrievers:
+                        if hasattr(retriever, 'search_kwargs'):
+                            retriever.search_kwargs['k'] = k
+                        elif hasattr(retriever, 'k'):
+                            retriever.k = k
+                
+                docs = hybrid_retriever.get_relevant_documents(query)
+                
+                # 去重处理
+                for doc in docs:
+                    content_hash = hash(doc.page_content)
+                    if config.ENABLE_DOCUMENT_DEDUPLICATION:
+                        if content_hash not in seen_contents:
+                            all_documents.append(doc)
+                            seen_contents.add(content_hash)
+                    else:
+                        all_documents.append(doc)
+                        
+                print(f"    检索到 {len(docs)} 个文档")
+                
+            except Exception as e:
+                print(f"    查询执行失败: {e}")
+                continue
+        
+        print(f"  - 多查询检索完成，共获得 {len(all_documents)} 个文档")
+        return all_documents
+
     def ask(self, question: str) -> Dict[str, Any]:
         """
         对已加载的文档提出问题，并获取答案。
+        支持问题改写功能，提高搜索覆盖面。
 
         Args:
             question: 用户提出的问题字符串。
@@ -341,5 +470,73 @@ class RagPipeline:
             }
         
         print(f"\n正在处理问题: '{question}'...")
-        result = self.qa_chain.invoke({"query": question})
-        return result
+        
+        # 如果启用了问题改写功能
+        if config.ENABLE_QUERY_REWRITING:
+            print("--- 问题改写阶段 ---")
+            
+            # 1. 改写问题
+            rewritten_queries = self._rewrite_query(question)
+            
+            # 2. 使用多个问题进行检索
+            print("--- 多查询检索阶段 ---")
+            retrieved_docs = self._retrieve_with_multiple_queries(rewritten_queries)
+            
+            # 3. 重排序
+            print("--- 重排序阶段 ---")
+            if retrieved_docs and self.reranker:
+                try:
+                    # 使用重排序器对所有检索到的文档进行重排序
+                    reranked_docs = self.reranker.compress_documents(retrieved_docs, question)
+                    final_docs = reranked_docs[:config.RERANKER_TOP_N]
+                    print(f"  - 重排序完成，最终选择 {len(final_docs)} 个最相关文档")
+                except Exception as e:
+                    print(f"  - 重排序失败: {e}，使用原始检索结果")
+                    final_docs = retrieved_docs[:config.RERANKER_TOP_N]
+            else:
+                final_docs = retrieved_docs[:config.RERANKER_TOP_N]
+            
+            # 4. 生成答案
+            print("--- 答案生成阶段 ---")
+            if final_docs:
+                # 构建上下文
+                context = "\n\n".join([doc.page_content for doc in final_docs])
+                
+                # 使用自定义提示模板生成答案
+                prompt_template = """
+请你扮演一个严谨的文档问答机器人。
+请严格根据下面提供的"上下文信息"来回答"问题"。
+如果上下文中没有足够的信息来回答问题，请直接说："根据提供的资料，我无法回答该问题。"
+不允许编造或添加上下文之外的任何信息。
+
+---
+上下文信息:
+{context}
+---
+
+问题: {question}
+
+回答:
+"""
+                
+                prompt = prompt_template.format(context=context, question=question)
+                response = self.llm.invoke(prompt)
+                
+                if hasattr(response, 'content'):
+                    answer = response.content.strip()
+                else:
+                    answer = str(response).strip()
+                
+                return {
+                    "result": answer,
+                    "source_documents": final_docs
+                }
+            else:
+                return {
+                    "result": "根据提供的资料，我无法找到相关信息来回答该问题。",
+                    "source_documents": []
+                }
+        else:
+            # 使用原始的问答链
+            result = self.qa_chain.invoke({"query": question})
+            return result
