@@ -27,6 +27,11 @@ from langchain.retrievers import ContextualCompressionRetriever
 from langchain.retrievers.document_compressors import CrossEncoderReranker
 from langchain_community.cross_encoders import HuggingFaceCrossEncoder # <-- 导入这个新类
 
+# 混合检索相关组件
+from langchain.retrievers import EnsembleRetriever
+from langchain_community.retrievers import BM25Retriever
+import jieba  # 中文分词库
+
 # 导入项目配置
 from . import config
 
@@ -44,10 +49,13 @@ class RagPipeline:
         print("正在初始化 RAG Pipeline...")
         self._setup_models()
         self.vector_store = self._load_vector_store()
+        self.all_documents = []  # 存储所有文档，用于关键字检索
+        self.bm25_retriever = None  # BM25检索器
         
         # === 【已修正】关键改动：只有在成功加载数据库后才构建问答链 ===
         if self.vector_store:
             print("已成功加载现有数据库，正在构建问答链...")
+            self._load_all_documents()  # 加载所有文档用于关键字检索
             self._build_qa_chain()
         else:
             print("未发现现有数据库。问答链将在数据同步后构建。")
@@ -169,17 +177,75 @@ class RagPipeline:
             self.vector_store.add_documents(chunks)
             print("  - 新的文本块已成功添加到现有数据库。")
 
-        # 6. 重新构建问答链以包含新知识
+        # 6. 重新加载所有文档并构建问答链以包含新知识
         print("数据同步完成，正在更新问答链...")
+        self._load_all_documents()  # 重新加载所有文档用于关键字检索
         self._build_qa_chain()
         print("问答链已更新，包含最新知识。")
 
+    def _load_all_documents(self):
+        """
+        从向量数据库中加载所有文档，用于构建关键字检索器。
+        """
+        if not self.vector_store:
+            print("警告: 向量数据库未初始化，无法加载文档用于关键字检索。")
+            return
+        
+        try:
+            # 从ChromaDB获取所有文档内容和元数据
+            all_entries = self.vector_store.get(include=["documents", "metadatas"])
+            
+            # 重构Document对象
+            self.all_documents = []
+            for i, (doc_content, metadata) in enumerate(zip(all_entries['documents'], all_entries['metadatas'])):
+                doc = Document(
+                    page_content=doc_content,
+                    metadata=metadata or {}
+                )
+                self.all_documents.append(doc)
+            
+            print(f"  - 已加载 {len(self.all_documents)} 个文档块用于关键字检索")
+            
+            # 构建BM25检索器
+            self._build_bm25_retriever()
+            
+        except Exception as e:
+            print(f"加载文档用于关键字检索时出错: {e}")
+            self.all_documents = []
+
+    def _build_bm25_retriever(self):
+        """
+        构建BM25关键字检索器。
+        """
+        if not self.all_documents:
+            print("警告: 没有文档可用于构建BM25检索器。")
+            return
+        
+        try:
+            # 使用jieba进行中文分词的预处理函数
+            def preprocess_func(text: str) -> List[str]:
+                # 对中文文本进行分词
+                return list(jieba.cut(text))
+            
+            # 构建BM25检索器
+            self.bm25_retriever = BM25Retriever.from_documents(
+                self.all_documents,
+                preprocess_func=preprocess_func
+            )
+            self.bm25_retriever.k = config.KEYWORD_RETRIEVER_TOP_K
+            
+            print(f"  - BM25关键字检索器构建完成，Top-K: {config.KEYWORD_RETRIEVER_TOP_K}")
+            
+        except Exception as e:
+            print(f"构建BM25检索器时出错: {e}")
+            self.bm25_retriever = None
+
     def _setup_llm(self):
         """加载大语言模型配置。"""
-        api_key = os.getenv("DeepSeek_api_key")
-        base_url = os.getenv("DeepSeek_base_url")
-        model_name = os.getenv("DeepSeek_model_name")
-
+        api_key = os.getenv("CLOUD_INFINI_API_KEY")
+        base_url = os.getenv("CLOUD_BASE_URL")
+        model_name = os.getenv("CLOUD_MODEL_NAME")
+        print(f'api_key--{api_key}--{base_url}--{model_name}')
         if not all([api_key, base_url, model_name]):
             raise ValueError(
                 "API密钥或模型配置未找到。请检查您的 .env 文件是否包含 "
@@ -199,16 +265,13 @@ class RagPipeline:
         """
         构建包含检索器、重排序器和LLM的问答链。
         """
-        # 基础检索器，从向量数据库中获取文档
-        base_retriever = self.vector_store.as_retriever(
-            search_type="similarity",
-            search_kwargs={"k": config.RETRIEVER_TOP_K}
-        )
+        # 构建混合检索器
+        hybrid_retriever = self._build_hybrid_retriever()
         
         # 压缩检索器，集成了重排序逻辑
         compression_retriever = ContextualCompressionRetriever(
             base_compressor=self.reranker,
-            base_retriever=base_retriever
+            base_retriever=hybrid_retriever
         )
         
         # 定义一个提示模板，指导LLM如何利用上下文回答问题
@@ -236,6 +299,30 @@ class RagPipeline:
             chain_type_kwargs={"prompt": QA_CHAIN_PROMPT},
             return_source_documents=True # 返回引用的源文档，便于溯源
         )
+
+    def _build_hybrid_retriever(self):
+        """
+        构建混合检索器，结合向量检索和关键字检索。
+        """
+        # 向量检索器
+        vector_retriever = self.vector_store.as_retriever(
+            search_type="similarity",
+            search_kwargs={"k": config.RETRIEVER_TOP_K}
+        )
+        
+        # 根据配置决定是否启用混合检索
+        if config.ENABLE_HYBRID_SEARCH and self.bm25_retriever is not None:
+            print(f"  - 启用混合检索模式 (向量权重: {config.VECTOR_SEARCH_WEIGHT}, 关键字权重: {config.KEYWORD_SEARCH_WEIGHT})")
+            
+            # 创建混合检索器
+            ensemble_retriever = EnsembleRetriever(
+                retrievers=[vector_retriever, self.bm25_retriever],
+                weights=[config.VECTOR_SEARCH_WEIGHT, config.KEYWORD_SEARCH_WEIGHT]
+            )
+            return ensemble_retriever
+        else:
+            print("  - 使用纯向量检索模式")
+            return vector_retriever
 
     def ask(self, question: str) -> Dict[str, Any]:
         """

@@ -28,5 +28,15 @@ CHUNK_OVERLAP: int = 150
 # 向量检索Top K: 从向量数据库中初步检索出的最相似文档数量
 RETRIEVER_TOP_K: int = 10
 
+# 关键字检索Top K: 从关键字检索中获取的文档数量
+KEYWORD_RETRIEVER_TOP_K: int = 5
+
+# 混合检索权重配置
+VECTOR_SEARCH_WEIGHT: float = 0.7  # 向量检索权重
+KEYWORD_SEARCH_WEIGHT: float = 0.3  # 关键字检索权重
+
 # 重排序Top N: 经过重排序后，最终选送给大语言模型的文档数量
 RERANKER_TOP_N: int = 3
+
+# 是否启用混合检索 (True: 混合检索, False: 仅向量检索)
+ENABLE_HYBRID_SEARCH: bool = True

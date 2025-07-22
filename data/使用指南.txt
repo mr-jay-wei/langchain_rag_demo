@@ -1,0 +1,5 @@
+如何配置混合检索：
+        1. 在config.py中设置ENABLE_HYBRID_SEARCH为True
+        2. 调整VECTOR_SEARCH_WEIGHT和KEYWORD_SEARCH_WEIGHT权重
+        3. 设置KEYWORD_RETRIEVER_TOP_K参数
+        系统会自动使用jieba进行中文分词处理。
