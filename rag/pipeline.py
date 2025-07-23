@@ -20,8 +20,8 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import DirectoryLoader, TextLoader
 
 # 向量存储与嵌入
-from langchain_community.vectorstores import Chroma
-from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_chroma import Chroma
+from langchain_huggingface import HuggingFaceEmbeddings
 # LLM 与 RAG 链
 from langchain_openai import ChatOpenAI
 from langchain.chains import RetrievalQA
@@ -34,6 +34,10 @@ from langchain_community.cross_encoders import HuggingFaceCrossEncoder # <-- 导
 # 混合检索相关组件
 from langchain.retrievers import EnsembleRetriever
 from langchain_community.retrievers import BM25Retriever
+
+# 抑制 jieba 的 pkg_resources 弃用警告
+import warnings
+warnings.filterwarnings("ignore", message="pkg_resources is deprecated", category=UserWarning)
 import jieba  # 中文分词库
 
 # 导入项目配置
@@ -86,6 +90,26 @@ class RagPipeline:
         self._setup_llm()
         self.qa_chain = None
 
+    def _setup_llm(self):
+        """加载大语言模型配置。"""
+        api_key = os.getenv("CLOUD_INFINI_API_KEY")
+        base_url = os.getenv("CLOUD_BASE_URL")
+        model_name = os.getenv("CLOUD_MODEL_NAME")
+        if not all([api_key, base_url, model_name]):
+            raise ValueError(
+                "API密钥或模型配置未找到。请检查您的 .env 文件是否包含 "
+                "LLM_API_KEY, LLM_BASE_URL, 和 LLM_MODEL_NAME。"
+            )
+        
+        print(f"  - 配置大语言模型: {model_name}")
+        self.llm = ChatOpenAI(
+            model=model_name,  # 模型名称
+            openai_api_key=api_key,  # 在平台注册账号后获取
+            openai_api_base=base_url,  # 平台 API 地址
+            temperature=0,
+            seed=42
+            )
+
     def _load_vector_store(self) -> Chroma:
         """加载向量数据库。如果不存在，则返回None。"""
         persist_directory = config.VECTOR_STORE_PATH
@@ -97,7 +121,6 @@ class RagPipeline:
             )
         return None
 
-    # === 【已修正】补充了 _get_processed_sources 方法的完整实现 ===
     def _get_processed_sources(self) -> Set[str]:
         """
         从向量数据库中获取所有已处理过的文档源路径。
@@ -809,27 +832,6 @@ class RagPipeline:
             print(f"构建BM25检索器时出错: {e}")
             self.bm25_retriever = None
 
-    def _setup_llm(self):
-        """加载大语言模型配置。"""
-        api_key = os.getenv("CLOUD_INFINI_API_KEY")
-        base_url = os.getenv("CLOUD_BASE_URL")
-        model_name = os.getenv("CLOUD_MODEL_NAME")
-        print(f'api_key--{api_key}--{base_url}--{model_name}')
-        if not all([api_key, base_url, model_name]):
-            raise ValueError(
-                "API密钥或模型配置未找到。请检查您的 .env 文件是否包含 "
-                "LLM_API_KEY, LLM_BASE_URL, 和 LLM_MODEL_NAME。"
-            )
-        
-        print(f"  - 配置大语言模型: {model_name}")
-        self.llm = ChatOpenAI(
-        model=model_name,  # 模型名称
-        openai_api_key=api_key,  # 在平台注册账号后获取
-        openai_api_base=base_url,  # 平台 API 地址
-        temperature=0,
-        seed=42
-        )
-
     def _build_qa_chain(self):
         """
         构建包含检索器、重排序器和LLM的问答链。
@@ -845,20 +847,20 @@ class RagPipeline:
         
         # 定义一个提示模板，指导LLM如何利用上下文回答问题
         prompt_template = """
-        请你扮演一个严谨的文档问答机器人。
-        请严格根据下面提供的“上下文信息”来回答“问题”。
-        如果上下文中没有足够的信息来回答问题，请直接说：“根据提供的资料，我无法回答该问题。”
-        不允许编造或添加上下文之外的任何信息。
+            请你扮演一个严谨的文档问答机器人。
+            请严格根据下面提供的“上下文信息”来回答“问题”。
+            如果上下文中没有足够的信息来回答问题，请直接说：“根据提供的资料，我无法回答该问题。”
+            不允许编造或添加上下文之外的任何信息。
 
-        ---
-        上下文信息:
-        {context}
-        ---
+            ---
+            上下文信息:
+            {context}
+            ---
 
-        问题: {question}
+            问题: {question}
 
-        回答:
-        """
+            回答:
+            """
         QA_CHAIN_PROMPT = PromptTemplate.from_template(prompt_template)
 
         self.qa_chain = RetrievalQA.from_chain_type(
@@ -950,20 +952,20 @@ class RagPipeline:
                 
                 # 使用自定义提示模板生成答案
                 prompt_template = """
-请你扮演一个严谨的文档问答机器人。
-请严格根据下面提供的"上下文信息"来回答"问题"。
-如果上下文中没有足够的信息来回答问题，请直接说："根据提供的资料，我无法回答该问题。"
-不允许编造或添加上下文之外的任何信息。
+                    请你扮演一个严谨的文档问答机器人。
+                    请严格根据下面提供的"上下文信息"来回答"问题"。
+                    如果上下文中没有足够的信息来回答问题，请直接说："根据提供的资料，我无法回答该问题。"
+                    不允许编造或添加上下文之外的任何信息。
 
----
-上下文信息:
-{context}
----
+                    ---
+                    上下文信息:
+                    {context}
+                    ---
 
-问题: {question}
+                    问题: {question}
 
-回答:
-"""
+                    回答:
+                    """
                 
                 prompt = prompt_template.format(context=context, question=question)
                 response = self.llm.invoke(prompt)
@@ -997,20 +999,20 @@ class RagPipeline:
                 from langchain_core.prompts import PromptTemplate
                 
                 prompt_template = """
-请你扮演一个严谨的文档问答机器人。
-请严格根据下面提供的"上下文信息"来回答"问题"。
-如果上下文中没有足够的信息来回答问题，请直接说："根据提供的资料，我无法回答该问题。"
-不允许编造或添加上下文之外的任何信息。
+                    请你扮演一个严谨的文档问答机器人。
+                    请严格根据下面提供的"上下文信息"来回答"问题"。
+                    如果上下文中没有足够的信息来回答问题，请直接说："根据提供的资料，我无法回答该问题。"
+                    不允许编造或添加上下文之外的任何信息。
 
----
-上下文信息:
-{context}
----
+                    ---
+                    上下文信息:
+                    {context}
+                    ---
 
-问题: {question}
+                    问题: {question}
 
-回答:
-"""
+                    回答:
+                    """
                 QA_CHAIN_PROMPT = PromptTemplate.from_template(prompt_template)
                 
                 temp_qa_chain = RetrievalQA.from_chain_type(
@@ -1066,7 +1068,7 @@ class RagPipeline:
                         elif hasattr(retriever, 'k'):
                             retriever.k = k
                 
-                docs = category_retriever.get_relevant_documents(query)
+                docs = category_retriever.invoke(query)
                 
                 # 去重处理
                 for doc in docs:
@@ -1222,19 +1224,19 @@ class RagPipeline:
         try:
             # 构建问题改写的提示模板
             rewrite_prompt = PromptTemplate.from_template("""
-你是一个专业的问题改写助手。请将用户的问题改写成{count}个不同角度但相关的问题，以提高信息检索的覆盖面。
+                你是一个专业的问题改写助手。请将用户的问题改写成{count}个不同角度但相关的问题，以提高信息检索的覆盖面。
 
-要求：
-1. 保持问题的核心意图不变
-2. 从不同角度或层面来表达同一个需求
-3. 使用不同的关键词和表达方式
-4. 每个问题都应该是完整、清晰的
-5. 问题之间要有一定的差异性
+                要求：
+                1. 保持问题的核心意图不变
+                2. 从不同角度或层面来表达同一个需求
+                3. 使用不同的关键词和表达方式
+                4. 每个问题都应该是完整、清晰的
+                5. 问题之间要有一定的差异性
 
-原始问题：{original_query}
+                原始问题：{original_query}
 
-请生成{count}个改写问题，每行一个问题，不要添加编号或其他格式：
-""")
+                请生成{count}个改写问题，每行一个问题，不要添加编号或其他格式：
+                """)
             
             # 调用LLM进行问题改写
             prompt = rewrite_prompt.format(
@@ -1313,7 +1315,7 @@ class RagPipeline:
                         elif hasattr(retriever, 'k'):
                             retriever.k = k
                 
-                docs = hybrid_retriever.get_relevant_documents(query)
+                docs = hybrid_retriever.invoke(query)
                 
                 # 去重处理
                 for doc in docs:
@@ -1386,20 +1388,20 @@ class RagPipeline:
                 
                 # 使用自定义提示模板生成答案
                 prompt_template = """
-请你扮演一个严谨的文档问答机器人。
-请严格根据下面提供的"上下文信息"来回答"问题"。
-如果上下文中没有足够的信息来回答问题，请直接说："根据提供的资料，我无法回答该问题。"
-不允许编造或添加上下文之外的任何信息。
+                    请你扮演一个严谨的文档问答机器人。
+                    请严格根据下面提供的"上下文信息"来回答"问题"。
+                    如果上下文中没有足够的信息来回答问题，请直接说："根据提供的资料，我无法回答该问题。"
+                    不允许编造或添加上下文之外的任何信息。
 
----
-上下文信息:
-{context}
----
+                    ---
+                    上下文信息:
+                    {context}
+                    ---
 
-问题: {question}
+                    问题: {question}
 
-回答:
-"""
+                    回答:
+                    """
                 
                 prompt = prompt_template.format(context=context, question=question)
                 response = self.llm.invoke(prompt)
