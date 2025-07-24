@@ -497,6 +497,55 @@ class RagPipeline:
             
             if new_docs:
                 chunks = self.text_splitter.split_documents(new_docs)
+                '''chunks demo
+                chunks = [
+                    Document(
+                        page_content="机器学习是人工智能的一个分支，它使计算机能够在没有明确编程的情况下学习。",
+                        metadata={
+                            # 原始文件信息
+                            'source': 'data/机器学习介绍.txt',
+                            
+                            # 文件元数据（由 _get_file_info 添加）
+                            'file_hash': 'a1b2c3d4e5f6...',
+                            'file_mtime': 1704067200.123,
+                            'file_size': 256,
+                            
+                            # 分块信息（由代码添加）
+                            'chunk_id': 'doc_5d41402abc4b2a76b9719d911017c592_0',
+                            
+                            # 可能的其他元数据
+                            'chunk_index': 0,
+                            'total_chunks': 3
+                        }
+                    ),
+                    
+                    Document(
+                        page_content="机器学习算法通过训练数据来构建数学模型，以便对新数据进行预测或决策。",
+                        metadata={
+                            'source': 'data/机器学习介绍.txt',
+                            'file_hash': 'a1b2c3d4e5f6...',
+                            'file_mtime': 1704067200.123,
+                            'file_size': 256,
+                            'chunk_id': 'doc_5d41402abc4b2a76b9719d911017c592_1',
+                            'chunk_index': 1,
+                            'total_chunks': 3
+                        }
+                    ),
+                    
+                    Document(
+                        page_content="常见的机器学习类型包括监督学习、无监督学习和强化学习。",
+                        metadata={
+                            'source': 'data/机器学习介绍.txt',
+                            'file_hash': 'a1b2c3d4e5f6...',
+                            'file_mtime': 1704067200.123,
+                            'file_size': 256,
+                            'chunk_id': 'doc_5d41402abc4b2a76b9719d911017c592_2',
+                            'chunk_index': 2,
+                            'total_chunks': 3
+                        }
+                    )
+                ]
+                '''
                 print(f"  - 新文档被分割成 {len(chunks)} 个文本块。")
 
                 # 生成唯一ID
@@ -1349,7 +1398,7 @@ class RagPipeline:
         """
         if not self.qa_chain:
             return {
-                "result": "错误: 问答链尚未初始化。请先调用 `load_and_process_documents` 方法加载文档。",
+                "result": "错误: 问答链尚未初始化。请先调用 `sync_data_directory` 方法加载文档。",
                 "source_documents": []
             }
         

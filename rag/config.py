@@ -29,7 +29,7 @@ ENTERPRISE_DATA_SOURCES: Dict[str, Dict[str, Any]] = {
         "description": "通用知识库",
         "enabled": True,
         "file_patterns": ["*.txt", "*.md", "*.pdf"],
-        "priority": 1
+        "priority": 1 # 预留字段，用于未来的优先级功能
     },
     
     # 技术文档目录
@@ -39,7 +39,7 @@ ENTERPRISE_DATA_SOURCES: Dict[str, Dict[str, Any]] = {
         "description": "技术文档库",
         "enabled": True,
         "file_patterns": ["*.txt", "*.md"],
-        "priority": 2
+        "priority": 2 # 预留字段，用于未来的优先级功能
     },
     
     # 产品文档目录
@@ -49,7 +49,7 @@ ENTERPRISE_DATA_SOURCES: Dict[str, Dict[str, Any]] = {
         "description": "产品文档库",
         "enabled": True,
         "file_patterns": ["*.txt", "*.md"],
-        "priority": 3
+        "priority": 3 # 预留字段，用于未来的优先级功能
     },
     
     # 可以添加更多数据源，比如不同硬盘的路径
@@ -59,7 +59,7 @@ ENTERPRISE_DATA_SOURCES: Dict[str, Dict[str, Any]] = {
     #     "description": "企业文档库(D盘)",
     #     "enabled": True,
     #     "file_patterns": ["*.txt", "*.md", "*.pdf"],
-    #     "priority": 4
+    #     "priority": 4 # 预留字段，用于未来的优先级功能
     # },
     
     # "disk_e": {
@@ -68,7 +68,7 @@ ENTERPRISE_DATA_SOURCES: Dict[str, Dict[str, Any]] = {
     #     "description": "研究文档库(E盘)",
     #     "enabled": True,
     #     "file_patterns": ["*.txt", "*.md"],
-    #     "priority": 5
+    #     "priority": 5 # 预留字段，用于未来的优先级功能
     # }
 }
 
@@ -132,9 +132,6 @@ ENABLE_DOCUMENT_DEDUPLICATION: bool = True
 
 # 是否启用智能文件监控和更新
 ENABLE_FILE_MONITORING: bool = True
-
-# 文件修改时间检查间隔(秒)，用于检测文件是否被修改
-FILE_CHECK_INTERVAL: int = 1
 
 # 是否在同步时自动删除不存在的文件对应的文档
 AUTO_DELETE_MISSING_FILES: bool = True
