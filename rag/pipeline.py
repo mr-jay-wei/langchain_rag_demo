@@ -92,9 +92,12 @@ class RagPipeline:
 
     def _setup_llm(self):
         """加载大语言模型配置。"""
-        api_key = os.getenv("CLOUD_INFINI_API_KEY")
-        base_url = os.getenv("CLOUD_BASE_URL")
-        model_name = os.getenv("CLOUD_MODEL_NAME")
+        # api_key = os.getenv("CLOUD_INFINI_API_KEY")
+        # base_url = os.getenv("CLOUD_BASE_URL")
+        # model_name = os.getenv("CLOUD_MODEL_NAME")
+        api_key = os.getenv("DeepSeek_api_key")
+        base_url = os.getenv("DeepSeek_base_url")
+        model_name = os.getenv("DeepSeek_model_name")
         if not all([api_key, base_url, model_name]):
             raise ValueError(
                 "API密钥或模型配置未找到。请检查您的 .env 文件是否包含 "
