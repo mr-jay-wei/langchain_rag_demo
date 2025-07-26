@@ -99,14 +99,27 @@ class StreamingRagPipeline(AsyncRagPipeline):
                 else:
                     final_docs = retrieved_docs[:config.RERANKER_TOP_N]
             else:
-                # 使用原始问答链
-                result = await self._run_in_executor(
-                    self.qa_chain.invoke, {"query": question}
-                )
-                final_docs = result.get('source_documents', [])
-                # 对于非改写模式，我们需要直接流式输出结果
-                async for event in self._stream_existing_answer(result.get('result', '')):
-                    yield event
+                # ✅ 使用异步检索功能，避免调用LLM
+                retriever = self.qa_chain.retriever
+                
+                # 使用异步检索方法
+                if hasattr(retriever, 'ainvoke'):
+                    final_docs = await retriever.ainvoke(question)
+                elif hasattr(retriever, 'aget_relevant_documents'):
+                    final_docs = await retriever.aget_relevant_documents(question)
+                else:
+                    # 如果没有异步方法，回退到线程池
+                    final_docs = await self._run_in_executor(
+                        retriever.get_relevant_documents, question
+                    )
+                
+                # 使用真正的流式生成（LLM只被调用一次，且是流式的）
+                if final_docs:
+                    async for event in self._generate_streaming_answer(question, final_docs):
+                        yield event
+                else:
+                    async for event in self._stream_text("根据提供的资料，我无法找到相关信息来回答该问题。"):
+                        yield event
                 return
             
             # 2. 流式生成阶段 - 这里才是真正的流式
@@ -178,56 +191,53 @@ class StreamingRagPipeline(AsyncRagPipeline):
                 else:
                     final_docs = retrieved_docs[:config.RERANKER_TOP_N]
             else:
-                # 使用分类检索的问答链
+                # ✅ 改进：使用分类检索但仍然使用真正的流式生成
                 if categories:
-                    def create_category_qa():
-                        from langchain.retrievers import ContextualCompressionRetriever
-                        from langchain.chains import RetrievalQA
-                        from langchain_core.prompts import PromptTemplate
-                        
+                    # 获取分类相关的文档
+                    def get_category_docs():
                         category_retriever = self._build_category_retriever(categories)
-                        compression_retriever = ContextualCompressionRetriever(
-                            base_compressor=self.reranker,
-                            base_retriever=category_retriever
-                        )
-                        
-                        prompt_template = """
-                            请你扮演一个严谨的文档问答机器人。
-                            请严格根据下面提供的"上下文信息"来回答"问题"。
-                            如果上下文中没有足够的信息来回答问题，请直接说："根据提供的资料，我无法回答该问题。"
-                            不允许编造或添加上下文之外的任何信息。
-
-                            ---
-                            上下文信息:
-                            {context}
-                            ---
-
-                            问题: {question}
-
-                            回答:
-                            """
-                        QA_CHAIN_PROMPT = PromptTemplate.from_template(prompt_template)
-                        
-                        temp_qa_chain = RetrievalQA.from_chain_type(
-                            llm=self.llm,
-                            chain_type="stuff",
-                            retriever=compression_retriever,
-                            chain_type_kwargs={"prompt": QA_CHAIN_PROMPT},
-                            return_source_documents=True
-                        )
-                        
-                        return temp_qa_chain.invoke({"query": question})
+                        if self.reranker:
+                            from langchain.retrievers import ContextualCompressionRetriever
+                            compression_retriever = ContextualCompressionRetriever(
+                                base_compressor=self.reranker,
+                                base_retriever=category_retriever
+                            )
+                            return compression_retriever.get_relevant_documents(question)
+                        else:
+                            return category_retriever.get_relevant_documents(question)
                     
-                    result = await self._run_in_executor(create_category_qa)
-                    async for event in self._stream_existing_answer(result.get('result', '')):
-                        yield event
+                    category_docs = await self._run_in_executor(get_category_docs)
+                    
+                    # 使用真正的流式生成
+                    if category_docs:
+                        async for event in self._generate_streaming_answer(question, category_docs):
+                            yield event
+                    else:
+                        async for event in self._stream_text("根据提供的资料，我无法找到相关信息来回答该问题。"):
+                            yield event
                     return
                 else:
-                    result = await self._run_in_executor(
-                        self.qa_chain.invoke, {"query": question}
-                    )
-                    async for event in self._stream_existing_answer(result.get('result', '')):
-                        yield event
+                    # ✅ 使用异步检索功能，避免调用LLM
+                    retriever = self.qa_chain.retriever
+                    
+                    # 使用异步检索方法
+                    if hasattr(retriever, 'ainvoke'):
+                        final_docs = await retriever.ainvoke(question)
+                    elif hasattr(retriever, 'aget_relevant_documents'):
+                        final_docs = await retriever.aget_relevant_documents(question)
+                    else:
+                        # 如果没有异步方法，回退到线程池
+                        final_docs = await self._run_in_executor(
+                            retriever.get_relevant_documents, question
+                        )
+                    
+                    # 使用真正的流式生成（LLM只被调用一次，且是流式的）
+                    if final_docs:
+                        async for event in self._generate_streaming_answer(question, final_docs):
+                            yield event
+                    else:
+                        async for event in self._stream_text("根据提供的资料，我无法找到相关信息来回答该问题。"):
+                            yield event
                     return
             
             # 流式生成答案
@@ -253,7 +263,7 @@ class StreamingRagPipeline(AsyncRagPipeline):
     
     async def _generate_streaming_answer(self, question: str, documents: List[Document]) -> AsyncGenerator[StreamEvent, None]:
         """
-        生成流式答案 - 这里是真正的流式输出
+        生成流式答案 - 真正的流式输出实现
         
         Args:
             question: 问题
@@ -291,17 +301,34 @@ class StreamingRagPipeline(AsyncRagPipeline):
             
             prompt = prompt_template.format(context=context, question=question)
             
-            # 调用LLM生成答案
-            response = await self._run_in_executor(self.llm.invoke, prompt)
-            
-            if hasattr(response, 'content'):
-                answer = response.content.strip()
+            # ✅ 关键改进：检查LLM是否支持流式调用
+            if hasattr(self.llm, 'astream'):
+                # 真正的流式LLM调用
+                async for chunk in self.llm.astream(prompt):
+                    if hasattr(chunk, 'content') and chunk.content:
+                        yield StreamEvent(
+                            type=StreamEventType.GENERATION_CHUNK,
+                            data={"chunk": chunk.content},
+                            timestamp=time.time()
+                        )
+                    elif isinstance(chunk, str) and chunk:
+                        yield StreamEvent(
+                            type=StreamEventType.GENERATION_CHUNK,
+                            data={"chunk": chunk},
+                            timestamp=time.time()
+                        )
             else:
-                answer = str(response).strip()
-            
-            # 流式输出答案
-            async for event in self._stream_text(answer):
-                yield event
+                # 如果LLM不支持流式，回退到当前实现
+                response = await self._run_in_executor(self.llm.invoke, prompt)
+                
+                if hasattr(response, 'content'):
+                    answer = response.content.strip()
+                else:
+                    answer = str(response).strip()
+                
+                # 流式输出已有答案
+                async for event in self._stream_text(answer):
+                    yield event
             
             # 生成结束，提供源文档信息
             yield StreamEvent(
@@ -353,7 +380,7 @@ class StreamingRagPipeline(AsyncRagPipeline):
     
     async def _stream_text(self, text: str) -> AsyncGenerator[StreamEvent, None]:
         """
-        核心的文本流式输出方法
+        核心的文本流式输出方法 - 生产环境版本
         
         Args:
             text: 要流式输出的文本
@@ -364,9 +391,10 @@ class StreamingRagPipeline(AsyncRagPipeline):
         if not text:
             return
         
-        # 方案1: 按字符流式输出（更平滑）
+        # 生产环境：按字符流式输出，无人为延迟
         for i, char in enumerate(text):
-            await asyncio.sleep(0.02)  # 20ms延迟，模拟打字效果
+            # ✅ 移除人为延迟，直接流式输出
+            # 真实的延迟应该来自LLM生成，而不是人为添加
             
             yield StreamEvent(
                 type=StreamEventType.GENERATION_CHUNK,
@@ -397,7 +425,7 @@ class StreamingRagPipeline(AsyncRagPipeline):
     
     async def batch_ask_stream(self, questions: List[str]) -> AsyncGenerator[StreamEvent, None]:
         """
-        批量流式问答
+        批量流式问答 - 并发处理版本
         
         Args:
             questions: 问题列表
@@ -405,34 +433,123 @@ class StreamingRagPipeline(AsyncRagPipeline):
         Yields:
             StreamEvent: 流式事件
         """
+        if not questions:
+            return
+        
+        yield StreamEvent(
+            type=StreamEventType.PROCESSING,
+            data={
+                "message": f"开始并发处理 {len(questions)} 个问题",
+                "total_questions": len(questions),
+                "processing_mode": "concurrent"
+            },
+            timestamp=time.time()
+        )
+        
+        # 创建并发任务
+        tasks = []
         for i, question in enumerate(questions):
+            task = asyncio.create_task(
+                self._collect_question_events(question, i + 1, len(questions))
+            )
+            tasks.append(task)
+        
+        # 等待所有任务完成并收集结果
+        try:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            # 合并所有事件并按时间戳排序
+            all_events = []
+            successful_count = 0
+            
+            for i, result in enumerate(results):
+                if isinstance(result, Exception):
+                    # 处理异常情况
+                    yield StreamEvent(
+                        type=StreamEventType.ERROR,
+                        data={
+                            "error": f"处理问题 {i+1} 时出错: {str(result)}",
+                            "question": questions[i],
+                            "question_index": i + 1
+                        },
+                        timestamp=time.time()
+                    )
+                else:
+                    all_events.extend(result)
+                    successful_count += 1
+            
+            # 按时间戳排序所有事件
+            all_events.sort(key=lambda e: e.timestamp)
+            
+            # 流式输出所有事件
+            for event in all_events:
+                yield event
+            
+            # 发送完成事件
             yield StreamEvent(
-                type=StreamEventType.PROCESSING,
+                type=StreamEventType.COMPLETE,
                 data={
-                    "message": f"处理第 {i+1}/{len(questions)} 个问题: {question}",
-                    "question_index": i + 1,
-                    "total_questions": len(questions)
+                    "message": f"批量处理完成，成功处理 {successful_count}/{len(questions)} 个问题",
+                    "total_processed": successful_count,
+                    "total_questions": len(questions),
+                    "processing_mode": "concurrent"
                 },
                 timestamp=time.time()
             )
             
-            # 流式处理单个问题
+        except Exception as e:
+            yield StreamEvent(
+                type=StreamEventType.ERROR,
+                data={
+                    "error": f"批量处理过程中出错: {str(e)}",
+                    "total_questions": len(questions)
+                },
+                timestamp=time.time()
+            )
+    
+    async def _collect_question_events(self, question: str, index: int, total: int) -> List[StreamEvent]:
+        """
+        收集单个问题的所有事件
+        
+        Args:
+            question: 问题内容
+            index: 问题索引
+            total: 总问题数
+            
+        Returns:
+            List[StreamEvent]: 事件列表
+        """
+        events = []
+        
+        try:
             async for event in self.ask_stream(question):
                 # 为批量处理添加元数据
                 if event.metadata is None:
                     event.metadata = {}
                 event.metadata.update({
-                    "batch_index": i + 1,
-                    "batch_total": len(questions),
-                    "batch_question": question
+                    "batch_index": index,
+                    "batch_total": total,
+                    "batch_question": question,
+                    "processing_mode": "concurrent"
                 })
-                yield event
+                events.append(event)
+                
+        except Exception as e:
+            # 单个问题处理失败
+            error_event = StreamEvent(
+                type=StreamEventType.ERROR,
+                data={
+                    "error": f"处理问题失败: {str(e)}",
+                    "question": question
+                },
+                timestamp=time.time(),
+                metadata={
+                    "batch_index": index,
+                    "batch_total": total,
+                    "batch_question": question,
+                    "processing_mode": "concurrent"
+                }
+            )
+            events.append(error_event)
         
-        yield StreamEvent(
-            type=StreamEventType.COMPLETE,
-            data={
-                "message": f"批量处理完成，共处理 {len(questions)} 个问题",
-                "total_processed": len(questions)
-            },
-            timestamp=time.time()
-        )
+        return events

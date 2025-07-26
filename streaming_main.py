@@ -32,9 +32,16 @@ class StreamingDemo:
             print("📝 答案: ", end='', flush=True)  # 开始答案输出行
         
         elif event.type == StreamEventType.GENERATION_CHUNK:
-            # 这里是真正的流式输出 - 逐字符显示
+            # ✅ 这里展示真正的流式输出效果
             chunk = event.data.get('chunk', '')
             print(chunk, end='', flush=True)
+            
+            # 如果是真正的流式LLM，chunk可能是token而不是字符
+            # 这里可以根据chunk的长度来判断是字符流式还是token流式
+            if len(chunk) > 1:
+                # 可能是token流式，添加小延迟以便观察效果
+                import time as time_module
+                time_module.sleep(0.01)
         
         elif event.type == StreamEventType.GENERATION_END:
             print()  # 换行
