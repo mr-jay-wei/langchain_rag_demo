@@ -9,6 +9,8 @@ from enum import Enum
 # 继承异步RAG流程
 from .async_pipeline import AsyncRagPipeline
 from . import config
+# 导入提示词管理器
+from .prompt_manager import get_qa_prompt_template, get_query_rewrite_prompt_template
 
 # 导入需要的组件
 from langchain_core.documents import Document
@@ -283,21 +285,9 @@ class StreamingRagPipeline(AsyncRagPipeline):
             context = "\n\n".join([doc.page_content for doc in documents])
             
             # 构建提示
-            prompt_template = """
-                请你扮演一个严谨的文档问答机器人。
-                请严格根据下面提供的"上下文信息"来回答"问题"。
-                如果上下文中没有足够的信息来回答问题，请直接说："根据提供的资料，我无法回答该问题。"
-                不允许编造或添加上下文之外的任何信息。
-
-                ---
-                上下文信息:
-                {context}
-                ---
-
-                问题: {question}
-
-                回答:
-                """
+            # 使用提示词管理器获取问答提示模板
+            qa_template = get_qa_prompt_template()
+            prompt_template = qa_template.template
             
             prompt = prompt_template.format(context=context, question=question)
             

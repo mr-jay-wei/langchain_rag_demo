@@ -9,6 +9,8 @@ from concurrent.futures import ThreadPoolExecutor
 # 导入同步版本的RagPipeline
 from .pipeline import RagPipeline
 from . import config
+# 导入提示词管理器
+from .prompt_manager import get_qa_prompt_template, get_query_rewrite_prompt_template
 
 # 导入需要的组件
 from langchain_community.document_loaders import TextLoader
@@ -494,21 +496,9 @@ class AsyncRagPipeline(RagPipeline):
                 context = "\n\n".join([doc.page_content for doc in final_docs])
                 
                 # 使用自定义提示模板生成答案
-                prompt_template = """
-                    请你扮演一个严谨的文档问答机器人。
-                    请严格根据下面提供的"上下文信息"来回答"问题"。
-                    如果上下文中没有足够的信息来回答问题，请直接说："根据提供的资料，我无法回答该问题。"
-                    不允许编造或添加上下文之外的任何信息。
-
-                    ---
-                    上下文信息:
-                    {context}
-                    ---
-
-                    问题: {question}
-
-                    回答:
-                    """
+                # 使用提示词管理器获取问答提示模板
+                qa_template = get_qa_prompt_template()
+                prompt_template = qa_template.template
                 
                 prompt = prompt_template.format(context=context, question=question)
                 response = await self._run_in_executor(self.llm.invoke, prompt)
@@ -592,21 +582,9 @@ class AsyncRagPipeline(RagPipeline):
                 context = "\n\n".join([doc.page_content for doc in final_docs])
                 
                 # 使用自定义提示模板生成答案
-                prompt_template = """
-                    请你扮演一个严谨的文档问答机器人。
-                    请严格根据下面提供的"上下文信息"来回答"问题"。
-                    如果上下文中没有足够的信息来回答问题，请直接说："根据提供的资料，我无法回答该问题。"
-                    不允许编造或添加上下文之外的任何信息。
-
-                    ---
-                    上下文信息:
-                    {context}
-                    ---
-
-                    问题: {question}
-
-                    回答:
-                    """
+                # 使用提示词管理器获取问答提示模板
+                qa_template = get_qa_prompt_template()
+                prompt_template = qa_template.template
                 
                 prompt = prompt_template.format(context=context, question=question)
                 response = await self._run_in_executor(self.llm.invoke, prompt)
@@ -639,21 +617,9 @@ class AsyncRagPipeline(RagPipeline):
                     from langchain.chains import RetrievalQA
                     from langchain_core.prompts import PromptTemplate
                     
-                    prompt_template = """
-                        请你扮演一个严谨的文档问答机器人。
-                        请严格根据下面提供的"上下文信息"来回答"问题"。
-                        如果上下文中没有足够的信息来回答问题，请直接说："根据提供的资料，我无法回答该问题。"
-                        不允许编造或添加上下文之外的任何信息。
-
-                        ---
-                        上下文信息:
-                        {context}
-                        ---
-
-                        问题: {question}
-
-                        回答:
-                        """
+                    # 使用提示词管理器获取问答提示模板
+                    qa_template = get_qa_prompt_template()
+                    prompt_template = qa_template.template
                     QA_CHAIN_PROMPT = PromptTemplate.from_template(prompt_template)
                     
                     temp_qa_chain = RetrievalQA.from_chain_type(
@@ -693,20 +659,8 @@ class AsyncRagPipeline(RagPipeline):
             # 构建问题改写的提示模板
             from langchain_core.prompts import PromptTemplate
             
-            rewrite_prompt = PromptTemplate.from_template("""
-                你是一个专业的问题改写助手。请将用户的问题改写成{count}个不同角度但相关的问题，以提高信息检索的覆盖面。
-
-                要求：
-                1. 保持问题的核心意图不变
-                2. 从不同角度或层面来表达同一个需求
-                3. 使用不同的关键词和表达方式
-                4. 每个问题都应该是完整、清晰的
-                5. 问题之间要有一定的差异性
-
-                原始问题：{original_query}
-
-                请生成{count}个改写问题，每行一个问题，不要添加编号或其他格式：
-                """)
+            # 使用提示词管理器获取问题改写提示模板
+            rewrite_prompt = get_query_rewrite_prompt_template()
             
             # 异步调用LLM进行问题改写
             prompt = rewrite_prompt.format(
