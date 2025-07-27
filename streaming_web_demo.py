@@ -15,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 
 # 导入我们的流式RAG管道
 import sys
-sys.path.append(str(Path(__file__).parent.parent))
+sys.path.append(str(Path(__file__).parent))
 
 from rag.streaming_pipeline import StreamingRagPipeline
 
@@ -39,6 +39,16 @@ async def startup_event():
     except Exception as e:
         logger.error(f"RAG管道初始化失败: {e}")
         raise
+
+# === 添加 shutdown 事件 ===
+@app.on_event("shutdown")
+async def shutdown_event():
+    """应用关闭时清理资源"""
+    global rag_pipeline
+    if rag_pipeline and hasattr(rag_pipeline, 'executor'):
+        logger.info("应用正在关闭，清理线程池...")
+        rag_pipeline.executor.shutdown(wait=True)
+        logger.info("线程池已成功关闭。")
 
 @app.get("/")
 async def get_homepage():

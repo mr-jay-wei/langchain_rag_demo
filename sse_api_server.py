@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 from typing import List, Dict, Optional
 import json # <--- 导入json库
 # 导入我们的核心 RAG 引擎
-from rag.streaming_pipeline import StreamingRagPipeline, StreamEventType
+from rag.streaming_pipeline import StreamingRagPipeline, StreamEventType, StreamEvent
 
 # --- 日志配置 ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
