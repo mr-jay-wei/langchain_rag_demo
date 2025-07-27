@@ -116,13 +116,19 @@ class StreamingRagPipeline(AsyncRagPipeline):
                     )
                 
                 # 使用真正的流式生成（LLM只被调用一次，且是流式的）
-                if final_docs:
-                    async for event in self._generate_streaming_answer(question, final_docs):
-                        yield event
-                else:
-                    async for event in self._stream_text("根据提供的资料，我无法找到相关信息来回答该问题。"):
-                        yield event
-                return
+                # if final_docs:
+                #     async for event in self._generate_streaming_answer(question, final_docs):
+                #         yield event
+                # else:
+                #     async for event in self._stream_existing_answer("根据提供的资料，我无法找到相关信息来回答该问题。"):
+                #         yield event
+
+                # yield StreamEvent(
+                #         type=StreamEventType.COMPLETE,
+                #         data={"message": "回答完成"},
+                #         timestamp=time.time()
+                #     )
+                # return
             
             # 2. 流式生成阶段 - 这里才是真正的流式
             if final_docs:
@@ -130,7 +136,7 @@ class StreamingRagPipeline(AsyncRagPipeline):
                     yield event
             else:
                 # 没有找到相关文档
-                async for event in self._stream_text("根据提供的资料，我无法找到相关信息来回答该问题。"):
+                async for event in self._stream_no_result_answer():
                     yield event
             
             # 3. 完成
@@ -208,16 +214,22 @@ class StreamingRagPipeline(AsyncRagPipeline):
                         else:
                             return category_retriever.get_relevant_documents(question)
                     
-                    category_docs = await self._run_in_executor(get_category_docs)
+                    final_docs = await self._run_in_executor(get_category_docs)
                     
                     # 使用真正的流式生成
-                    if category_docs:
-                        async for event in self._generate_streaming_answer(question, category_docs):
-                            yield event
-                    else:
-                        async for event in self._stream_text("根据提供的资料，我无法找到相关信息来回答该问题。"):
-                            yield event
-                    return
+                    # if category_docs:
+                    #     async for event in self._generate_streaming_answer(question, category_docs):
+                    #         yield event
+                    # else:
+                    #     async for event in self._stream_existing_answer("根据提供的资料，我无法找到相关信息来回答该问题。"):
+                    #         yield event
+
+                    # yield StreamEvent(
+                    #         type=StreamEventType.COMPLETE,
+                    #         data={"message": "回答完成"},
+                    #         timestamp=time.time()
+                    #     )
+                    # return
                 else:
                     # ✅ 使用异步检索功能，避免调用LLM
                     retriever = self.qa_chain.retriever
@@ -234,20 +246,26 @@ class StreamingRagPipeline(AsyncRagPipeline):
                         )
                     
                     # 使用真正的流式生成（LLM只被调用一次，且是流式的）
-                    if final_docs:
-                        async for event in self._generate_streaming_answer(question, final_docs):
-                            yield event
-                    else:
-                        async for event in self._stream_text("根据提供的资料，我无法找到相关信息来回答该问题。"):
-                            yield event
-                    return
+                    # if final_docs:
+                    #     async for event in self._generate_streaming_answer(question, final_docs):
+                    #         yield event
+                    # else:
+                    #     async for event in self._stream_existing_answer("根据提供的资料，我无法找到相关信息来回答该问题。"):
+                    #         yield event
+                    
+                    # yield StreamEvent(
+                    #         type=StreamEventType.COMPLETE,
+                    #         data={"message": "回答完成"},
+                    #         timestamp=time.time()
+                    #     )
+                    # return
             
             # 流式生成答案
             if final_docs:
                 async for event in self._generate_streaming_answer(question, final_docs):
                     yield event
             else:
-                async for event in self._stream_text("根据提供的资料，我无法找到相关信息来回答该问题。"):
+                async for event in self._stream_no_result_answer():
                     yield event
             
             yield StreamEvent(
@@ -287,9 +305,7 @@ class StreamingRagPipeline(AsyncRagPipeline):
             # 构建提示
             # 使用提示词管理器获取问答提示模板
             qa_template = get_qa_prompt_template()
-            prompt_template = qa_template.template
-            
-            prompt = prompt_template.format(context=context, question=question)
+            prompt = qa_template.format(context=context, question=question)
             
             # ✅ 关键改进：检查LLM是否支持流式调用
             if hasattr(self.llm, 'astream'):
@@ -543,3 +559,14 @@ class StreamingRagPipeline(AsyncRagPipeline):
             events.append(error_event)
         
         return events
+    
+    async def _stream_no_result_answer(self) -> AsyncGenerator[StreamEvent, None]:
+        """
+        流式输出"无结果"的标准答案
+        
+        Yields:
+            StreamEvent: 流式事件
+        """
+        no_result_message = "根据提供的资料，我无法找到相关信息来回答该问题。"
+        async for event in self._stream_existing_answer(no_result_message):
+            yield event
