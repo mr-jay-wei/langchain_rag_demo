@@ -105,9 +105,17 @@ class PromptManager:
             提示词文件名列表（不含扩展名）
         """
         prompt_files = []
+        # 使用 pathlib.Path.glob() 方法 (推荐)
         for file_path in self.prompts_dir.glob("*.txt"):
-            prompt_files.append(file_path.stem)
+            prompt_files.append(file_path.stem)  # .stem 获取不含扩展名的文件名
         return sorted(prompt_files)
+        
+        # 如果使用标准库 glob 的等价写法：
+        # import glob
+        # pattern = str(self.prompts_dir / "*.txt")
+        # for file_path in glob.glob(pattern):
+        #     filename = os.path.splitext(os.path.basename(file_path))[0]
+        #     prompt_files.append(filename)
     
     def save_prompt(self, prompt_name: str, content: str) -> None:
         """
