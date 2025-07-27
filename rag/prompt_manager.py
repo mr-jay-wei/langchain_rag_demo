@@ -2,7 +2,7 @@
 
 import os
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, Any
 from langchain_core.prompts import PromptTemplate
 
 
@@ -145,6 +145,101 @@ class PromptManager:
         self._prompt_cache.clear()
         self._template_cache.clear()
         print("提示词缓存已清除")
+    
+    def reload_all_prompts(self) -> Dict[str, str]:
+        """
+        重新加载所有提示词。
+        
+        Returns:
+            重新加载的提示词字典
+        """
+        # 清除所有缓存
+        self.clear_cache()
+        
+        # 重新加载所有提示词
+        reloaded_prompts = {}
+        for prompt_name in self.list_available_prompts():
+            try:
+                content = self.load_prompt(prompt_name)
+                reloaded_prompts[prompt_name] = content
+                print(f"✅ 重新加载: {prompt_name}")
+            except Exception as e:
+                print(f"❌ 重新加载失败 {prompt_name}: {e}")
+        
+        return reloaded_prompts
+    
+    def get_prompt_info(self, prompt_name: str) -> Dict[str, Any]:
+        """
+        获取提示词的详细信息。
+        
+        Args:
+            prompt_name: 提示词文件名（不含扩展名）
+            
+        Returns:
+            提示词信息字典
+        """
+        prompt_file = self.prompts_dir / f"{prompt_name}.txt"
+        
+        if not prompt_file.exists():
+            return {"exists": False, "error": f"提示词文件不存在: {prompt_file}"}
+        
+        try:
+            stat = prompt_file.stat()
+            content = self.load_prompt(prompt_name)
+            template = self.get_template(prompt_name)
+            
+            return {
+                "exists": True,
+                "file_path": str(prompt_file),
+                "file_size": stat.st_size,
+                "modified_time": stat.st_mtime,
+                "content_length": len(content),
+                "content_preview": content[:100] + "..." if len(content) > 100 else content,
+                "template_variables": template.input_variables,
+                "is_cached": prompt_name in self._prompt_cache
+            }
+        except Exception as e:
+            return {"exists": True, "error": f"获取提示词信息失败: {e}"}
+    
+    def validate_prompt(self, prompt_name: str) -> Dict[str, Any]:
+        """
+        验证提示词模板的有效性。
+        
+        Args:
+            prompt_name: 提示词文件名（不含扩展名）
+            
+        Returns:
+            验证结果字典
+        """
+        try:
+            template = self.get_template(prompt_name)
+            
+            # 检查必需的变量
+            required_vars = {"context", "question"}  # 问答提示词的必需变量
+            missing_vars = required_vars - set(template.input_variables)
+            extra_vars = set(template.input_variables) - required_vars
+            
+            # 尝试格式化测试
+            test_values = {var: f"test_{var}" for var in template.input_variables}
+            try:
+                formatted = template.format(**test_values)
+                format_test = {"success": True, "formatted_length": len(formatted)}
+            except Exception as e:
+                format_test = {"success": False, "error": str(e)}
+            
+            return {
+                "valid": len(missing_vars) == 0 and format_test["success"],
+                "template_variables": template.input_variables,
+                "missing_variables": list(missing_vars),
+                "extra_variables": list(extra_vars),
+                "format_test": format_test
+            }
+            
+        except Exception as e:
+            return {
+                "valid": False,
+                "error": f"验证提示词失败: {e}"
+            }
 
 
 # 创建全局提示词管理器实例
