@@ -135,8 +135,24 @@ class StreamingRagPipeline(AsyncRagPipeline):
             
             # 2. 流式生成阶段 - 这里才是真正的流式
             if final_docs:
-                async for event in self._generate_streaming_answer(question, final_docs):
-                    yield event
+                # 先尝试基于文档生成答案
+                knowledge_base_answer = ""
+                answer_events = []
+                
+                async for event in self._generate_streaming_answer(question, final_docs, use_memory):
+                    answer_events.append(event)
+                    if event.type.value == "generation_chunk":
+                        knowledge_base_answer += event.data.get("chunk", "")
+                
+                # 检查是否是"无法回答"的回复
+                if "根据提供的资料，我无法回答该问题" in knowledge_base_answer:
+                    # 知识库文档不相关，使用大模型自身知识
+                    async for event in self._stream_no_result_answer(question, use_memory):
+                        yield event
+                else:
+                    # 知识库文档相关，输出之前收集的事件
+                    for event in answer_events:
+                        yield event
             else:
                 # 没有找到相关文档
                 async for event in self._stream_no_result_answer(question, use_memory):
@@ -286,7 +302,7 @@ class StreamingRagPipeline(AsyncRagPipeline):
     
     async def _generate_streaming_answer(self, question: str, documents: List[Document], use_memory: bool = True) -> AsyncGenerator[StreamEvent, None]:
         """
-        生成流式答案 - 真正的流式输出实现，支持短期记忆功能
+        生成流式答案 - 基于知识库文档的回答，支持短期记忆功能
         
         Args:
             question: 问题
@@ -298,7 +314,7 @@ class StreamingRagPipeline(AsyncRagPipeline):
         """
         yield StreamEvent(
             type=StreamEventType.GENERATION_START,
-            data={"message": "开始生成答案"},
+            data={"message": "基于知识库文档生成答案"},
             timestamp=time.time()
         )
         
@@ -316,10 +332,28 @@ class StreamingRagPipeline(AsyncRagPipeline):
             if memory_context:
                 full_context = f"对话历史:\n{memory_context}\n\n当前检索到的相关信息:\n{context}"
             
-            # 构建提示
-            # 使用提示词管理器获取问答提示模板
-            qa_template = get_qa_prompt_template()
-            prompt = qa_template.format(context=full_context, question=question)
+            # 构建提示 - 使用提示词模板
+            try:
+                qa_template = get_qa_prompt_template()
+                knowledge_base_prompt = qa_template.format(
+                    context=full_context,
+                    question=question
+                )
+            except Exception:
+                # 如果提示词模板加载失败，使用备用提示词
+                knowledge_base_prompt = f"""请严格根据下面提供的"上下文信息"来回答"问题"。
+                    请在回答前加上"根据知识库资料："
+                    如果上下文中没有足够的信息来回答问题，请直接说："根据提供的资料，我无法回答该问题。"
+                    不允许编造或添加上下文之外的任何信息。
+
+                    ---
+                    上下文信息:
+                    {full_context}
+                    ---
+
+                    问题: {question}
+
+                    回答:"""
             
             # 收集完整答案用于保存到记忆
             complete_answer = ""
@@ -327,7 +361,7 @@ class StreamingRagPipeline(AsyncRagPipeline):
             # ✅ 关键改进：检查LLM是否支持流式调用
             if hasattr(self.llm, 'astream'):
                 # 真正的流式LLM调用
-                async for chunk in self.llm.astream(prompt):
+                async for chunk in self.llm.astream(knowledge_base_prompt):
                     if hasattr(chunk, 'content') and chunk.content:
                         complete_answer += chunk.content
                         yield StreamEvent(
@@ -344,7 +378,7 @@ class StreamingRagPipeline(AsyncRagPipeline):
                         )
             else:
                 # 如果LLM不支持流式，回退到当前实现
-                response = await self._run_in_executor(self.llm.invoke, prompt)
+                response = await self._run_in_executor(self.llm.invoke, knowledge_base_prompt)
                 
                 if hasattr(response, 'content'):
                     answer = response.content.strip()
@@ -365,7 +399,8 @@ class StreamingRagPipeline(AsyncRagPipeline):
                     metadata={
                         "source_documents_count": len(documents),
                         "memory_context_included": bool(memory_context),
-                        "streaming_mode": True
+                        "streaming_mode": True,
+                        "answer_source": "knowledge_base"
                     }
                 )
             
@@ -373,7 +408,7 @@ class StreamingRagPipeline(AsyncRagPipeline):
             yield StreamEvent(
                 type=StreamEventType.GENERATION_END,
                 data={
-                    "message": "答案生成完成",
+                    "message": "基于知识库的答案生成完成",
                     "source_documents": [
                         {
                             "source": doc.metadata.get('source', '未知来源'),
@@ -595,29 +630,131 @@ class StreamingRagPipeline(AsyncRagPipeline):
     
     async def _stream_no_result_answer(self, question: str = "", use_memory: bool = True) -> AsyncGenerator[StreamEvent, None]:
         """
-        流式输出"无结果"的标准答案
+        当知识库没有相关文档时，使用大模型自身知识回答
         
         Args:
-            question: 用户问题（用于保存到记忆）
+            question: 用户问题
             use_memory: 是否使用短期记忆功能
         
         Yields:
             StreamEvent: 流式事件
         """
-        no_result_message = "根据提供的资料，我无法找到相关信息来回答该问题。"
+        yield StreamEvent(
+            type=StreamEventType.GENERATION_START,
+            data={"message": "知识库未找到相关资料，使用大模型训练知识回答"},
+            timestamp=time.time()
+        )
         
-        # 保存对话到短期记忆
-        if use_memory and config.ENABLE_SHORT_TERM_MEMORY and question:
-            memory_manager.add_conversation(
-                question=question,
-                answer=no_result_message,
-                metadata={
-                    "source_documents_count": 0,
-                    "memory_context_included": False,
-                    "streaming_mode": True,
-                    "no_result": True
-                }
+        try:
+            # 获取短期记忆上下文
+            memory_context = ""
+            if use_memory and config.ENABLE_SHORT_TERM_MEMORY:
+                memory_context = memory_manager.get_conversation_context(include_count=None)
+            
+            # 构建使用大模型自身知识的提示
+            llm_knowledge_prompt = f"""知识库中没有找到相关资料来回答这个问题。
+                现在请使用你的训练知识来尝试回答用户的问题。
+
+                回答规则：
+                1. 如果这是一个你可以基于训练知识回答的常识性问题（比如科学知识、历史事实、一般性概念等），请在回答前加上"知识库资料未检索到内容，使用大模型训练知识回复："，然后提供准确的回答。
+
+                2. 只有在以下情况下才回复"根据提供的资料，我无法回答该问题。"：
+                - 需要预测未来的具体事件（如彩票号码、股价走势等）
+                - 涉及个人隐私信息
+                - 违法或有害内容
+                - 需要实时信息但你确实无法获取的情况
+                - 你完全不知道答案的专业技术问题
+
+                3. 对于"今天是星期几"这类问题，虽然你无法获取实时信息，但你可以解释如何查询，这属于可以回答的范畴。
+
+                {f"对话历史:{memory_context}" if memory_context else ""}
+
+                用户问题: {question}
+
+                回答:"""
+            
+            # 收集完整答案用于保存到记忆
+            complete_answer = ""
+            
+            # 使用大模型自身知识生成答案
+            if hasattr(self.llm, 'astream'):
+                # 流式调用
+                async for chunk in self.llm.astream(llm_knowledge_prompt):
+                    if hasattr(chunk, 'content') and chunk.content:
+                        complete_answer += chunk.content
+                        yield StreamEvent(
+                            type=StreamEventType.GENERATION_CHUNK,
+                            data={"chunk": chunk.content},
+                            timestamp=time.time()
+                        )
+                    elif isinstance(chunk, str) and chunk:
+                        complete_answer += chunk
+                        yield StreamEvent(
+                            type=StreamEventType.GENERATION_CHUNK,
+                            data={"chunk": chunk},
+                            timestamp=time.time()
+                        )
+            else:
+                # 非流式调用
+                response = await self._run_in_executor(self.llm.invoke, llm_knowledge_prompt)
+                
+                if hasattr(response, 'content'):
+                    answer = response.content.strip()
+                else:
+                    answer = str(response).strip()
+                
+                complete_answer = answer
+                
+                # 流式输出答案
+                async for event in self._stream_text(answer):
+                    yield event
+            
+            # 保存对话到短期记忆
+            if use_memory and config.ENABLE_SHORT_TERM_MEMORY and question and complete_answer:
+                memory_manager.add_conversation(
+                    question=question,
+                    answer=complete_answer.strip(),
+                    metadata={
+                        "source_documents_count": 0,
+                        "memory_context_included": bool(memory_context),
+                        "streaming_mode": True,
+                        "answer_source": "llm_knowledge"
+                    }
+                )
+            
+            # 生成结束
+            yield StreamEvent(
+                type=StreamEventType.GENERATION_END,
+                data={"message": "基于大模型训练知识的答案生成完成"},
+                timestamp=time.time()
             )
-        
-        async for event in self._stream_existing_answer(no_result_message):
-            yield event
+            
+        except Exception as e:
+            # 如果大模型调用也失败了，返回标准的无法回答消息
+            fallback_message = "根据提供的资料，我无法回答该问题。"
+            
+            yield StreamEvent(
+                type=StreamEventType.GENERATION_CHUNK,
+                data={"chunk": fallback_message},
+                timestamp=time.time()
+            )
+            
+            # 保存失败情况到记忆
+            if use_memory and config.ENABLE_SHORT_TERM_MEMORY and question:
+                memory_manager.add_conversation(
+                    question=question,
+                    answer=fallback_message,
+                    metadata={
+                        "source_documents_count": 0,
+                        "memory_context_included": bool(memory_context),
+                        "streaming_mode": True,
+                        "answer_source": "fallback",
+                        "error": str(e)
+                    }
+                )
+            
+            yield StreamEvent(
+                type=StreamEventType.GENERATION_END,
+                data={"message": "回答生成完成"},
+                timestamp=time.time()
+            )
