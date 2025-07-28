@@ -309,7 +309,7 @@ class StreamingRagPipeline(AsyncRagPipeline):
             # 获取短期记忆上下文
             memory_context = ""
             if use_memory and config.ENABLE_SHORT_TERM_MEMORY:
-                memory_context = memory_manager.get_conversation_context(include_count=5)
+                memory_context = memory_manager.get_conversation_context(include_count=None)  # 使用所有对话轮次
             
             # 构建完整的上下文（包含记忆上下文和检索上下文）
             full_context = context

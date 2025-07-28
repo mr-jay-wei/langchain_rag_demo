@@ -105,10 +105,11 @@ ENABLE_SHORT_TERM_MEMORY: bool = True
 SHORT_TERM_MEMORY_MAX_LENGTH: int = 100_000
 
 # 单条对话记录的最大字符长度（防止单条记录过长）
-SINGLE_CONVERSATION_MAX_LENGTH: int = 10_000
+# 设置为总记忆的1/5，确保至少能容纳5轮对话
+SINGLE_CONVERSATION_MAX_LENGTH: int = 20_000
 
 # 记忆保留的最小对话轮数（即使超过长度限制也保留最近的N轮对话）
-MIN_CONVERSATION_ROUNDS: int = 3
+MIN_CONVERSATION_ROUNDS: int = 1
 
 # 记忆清理策略
 # "auto" - 自动清理最旧的记录
@@ -118,6 +119,14 @@ MEMORY_CLEANUP_STRATEGY: str = "auto"
 
 # 滑动窗口大小（当策略为sliding_window时使用）
 SLIDING_WINDOW_SIZE: int = 20
+
+# --- 热重载配置 ---
+
+# 是否启用提示词热重载功能
+ENABLE_HOT_RELOAD: bool = True
+
+# 热重载防抖时间（秒）
+HOT_RELOAD_DEBOUNCE_TIME: float = 0.5
 
 # --- 检索与重排序配置 ---
 

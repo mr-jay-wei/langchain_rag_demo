@@ -30,14 +30,22 @@ rag_pipeline = None
 
 @app.on_event("startup")
 async def startup_event():
-    """应用启动时初始化RAG管道"""
+    """应用启动时初始化RAG管道和热重载功能"""
     global rag_pipeline
     try:
         logger.info("正在初始化RAG管道...")
         rag_pipeline = StreamingRagPipeline()
         logger.info("RAG管道初始化完成")
+        
+        # 启用热重载功能
+        from rag.hot_reload_manager import enable_hot_reload
+        if enable_hot_reload():
+            logger.info("🔥 热重载功能已启用")
+        else:
+            logger.warning("⚠️ 热重载功能启用失败")
+            
     except Exception as e:
-        logger.error(f"RAG管道初始化失败: {e}")
+        logger.error(f"初始化失败: {e}")
         raise
 
 # === 添加 shutdown 事件 ===
@@ -45,6 +53,13 @@ async def startup_event():
 async def shutdown_event():
     """应用关闭时清理资源"""
     global rag_pipeline
+    
+    # 停止热重载监控
+    from rag.hot_reload_manager import disable_hot_reload
+    disable_hot_reload()
+    logger.info("🛑 热重载监控已停止")
+    
+    # 清理线程池
     if rag_pipeline and hasattr(rag_pipeline, 'executor'):
         logger.info("应用正在关闭，清理线程池...")
         rag_pipeline.executor.shutdown(wait=True)

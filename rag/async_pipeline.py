@@ -465,6 +465,14 @@ class AsyncRagPipeline(RagPipeline):
         
         print(f"\n正在异步处理问题: '{question}'...")
         
+        # 获取短期记忆上下文（所有分支都需要）
+        memory_context = ""
+        if use_memory and config.ENABLE_SHORT_TERM_MEMORY:
+            memory_context = memory_manager.get_conversation_context(include_count=None)  # 使用所有对话轮次
+            if memory_context:
+                print("--- 短期记忆上下文 ---")
+                print(f"包含 {len(memory_manager.get_recent_conversations())} 轮对话作为上下文")
+        
         # 如果启用了问题改写功能
         if config.ENABLE_QUERY_REWRITING:
             print("--- 异步问题改写阶段 ---")
@@ -497,12 +505,17 @@ class AsyncRagPipeline(RagPipeline):
                 # 构建上下文
                 context = "\n\n".join([doc.page_content for doc in final_docs])
                 
+                # 构建完整的上下文（包含记忆上下文和检索上下文）
+                full_context = context
+                if memory_context:
+                    full_context = f"对话历史:\n{memory_context}\n\n当前检索到的相关信息:\n{context}"
+                
                 # 使用自定义提示模板生成答案
                 # 使用提示词管理器获取问答提示模板
                 qa_template = get_qa_prompt_template()
                 prompt_template = qa_template.template
                 
-                prompt = prompt_template.format(context=context, question=question)
+                prompt = prompt_template.format(context=full_context, question=question)
                 response = await self._run_in_executor(self.llm.invoke, prompt)
                 
                 if hasattr(response, 'content'):
@@ -510,23 +523,98 @@ class AsyncRagPipeline(RagPipeline):
                 else:
                     answer = str(response).strip()
                 
+                # 保存对话到短期记忆
+                if use_memory and config.ENABLE_SHORT_TERM_MEMORY:
+                    memory_manager.add_conversation(
+                        question=question,
+                        answer=answer,
+                        metadata={
+                            "source_documents_count": len(final_docs),
+                            "memory_context_included": bool(memory_context),
+                            "async_mode": True
+                        }
+                    )
+                
                 return {
                     "result": answer,
                     "source_documents": final_docs
                 }
             else:
+                no_result_answer = "根据提供的资料，我无法找到相关信息来回答该问题。"
+                
+                # 保存对话到短期记忆
+                if use_memory and config.ENABLE_SHORT_TERM_MEMORY:
+                    memory_manager.add_conversation(
+                        question=question,
+                        answer=no_result_answer,
+                        metadata={
+                            "source_documents_count": 0,
+                            "memory_context_included": False,
+                            "async_mode": True,
+                            "no_result": True
+                        }
+                    )
+                
                 return {
-                    "result": "根据提供的资料，我无法找到相关信息来回答该问题。",
+                    "result": no_result_answer,
                     "source_documents": []
                 }
         else:
-            # 使用原始的问答链
-            result = await self._run_in_executor(
-                self.qa_chain.invoke, {"query": question}
+            # 使用原始的问答链，但需要手动处理记忆上下文
+            print("--- 异步原始问答链模式 ---")
+            
+            # 先获取相关文档
+            retriever = self.qa_chain.retriever
+            retrieved_docs = await self._run_in_executor(
+                retriever.get_relevant_documents, question
             )
+            
+            if retrieved_docs:
+                # 构建上下文
+                context = "\n\n".join([doc.page_content for doc in retrieved_docs])
+                
+                # 构建完整的上下文（包含记忆上下文和检索上下文）
+                full_context = context
+                if memory_context:
+                    full_context = f"对话历史:\n{memory_context}\n\n当前检索到的相关信息:\n{context}"
+                
+                # 使用提示词管理器获取问答提示模板
+                qa_template = get_qa_prompt_template()
+                prompt = qa_template.format(context=full_context, question=question)
+                response = await self._run_in_executor(self.llm.invoke, prompt)
+                
+                if hasattr(response, 'content'):
+                    answer = response.content.strip()
+                else:
+                    answer = str(response).strip()
+                
+                result = {
+                    "result": answer,
+                    "source_documents": retrieved_docs
+                }
+            else:
+                no_result_answer = "根据提供的资料，我无法找到相关信息来回答该问题。"
+                result = {
+                    "result": no_result_answer,
+                    "source_documents": []
+                }
+            
+            # 保存对话到短期记忆（原始问答链模式）
+            if use_memory and config.ENABLE_SHORT_TERM_MEMORY:
+                memory_manager.add_conversation(
+                    question=question,
+                    answer=result.get("result", ""),
+                    metadata={
+                        "source_documents_count": len(result.get("source_documents", [])),
+                        "memory_context_included": bool(memory_context),
+                        "async_mode": True,
+                        "original_chain": True
+                    }
+                )
+            
             return result
 
-    async def ask_with_categories_async(self, question: str, categories: List[str] = None) -> Dict[str, Any]:
+    async def ask_with_categories_async(self, question: str, categories: List[str] = None, use_memory: bool = True) -> Dict[str, Any]:
         """
         异步版本的支持分类检索的问答功能。
         
@@ -550,6 +638,14 @@ class AsyncRagPipeline(RagPipeline):
         print(f"\n正在异步处理问题: '{question}'...")
         if categories:
             print(f"限定检索类别: {categories}")
+        
+        # 获取短期记忆上下文（所有分支都需要）
+        memory_context = ""
+        if use_memory and config.ENABLE_SHORT_TERM_MEMORY:
+            memory_context = memory_manager.get_conversation_context(include_count=None)  # 使用所有对话轮次
+            if memory_context:
+                print("--- 短期记忆上下文 ---")
+                print(f"包含 {len(memory_manager.get_recent_conversations())} 轮对话作为上下文")
         
         # 如果启用了问题改写功能
         if config.ENABLE_QUERY_REWRITING:
@@ -583,12 +679,17 @@ class AsyncRagPipeline(RagPipeline):
                 # 构建上下文
                 context = "\n\n".join([doc.page_content for doc in final_docs])
                 
+                # 构建完整的上下文（包含记忆上下文和检索上下文）
+                full_context = context
+                if memory_context:
+                    full_context = f"对话历史:\n{memory_context}\n\n当前检索到的相关信息:\n{context}"
+                
                 # 使用自定义提示模板生成答案
                 # 使用提示词管理器获取问答提示模板
                 qa_template = get_qa_prompt_template()
                 prompt_template = qa_template.template
                 
-                prompt = prompt_template.format(context=context, question=question)
+                prompt = prompt_template.format(context=full_context, question=question)
                 response = await self._run_in_executor(self.llm.invoke, prompt)
                 
                 if hasattr(response, 'content'):
@@ -596,51 +697,161 @@ class AsyncRagPipeline(RagPipeline):
                 else:
                     answer = str(response).strip()
                 
+                # 保存对话到短期记忆
+                if use_memory and config.ENABLE_SHORT_TERM_MEMORY:
+                    memory_manager.add_conversation(
+                        question=question,
+                        answer=answer,
+                        metadata={
+                            "used_query_rewriting": True,
+                            "used_categories": categories,
+                            "memory_context_included": bool(memory_context),
+                            "source_documents_count": len(final_docs),
+                            "async_mode": True
+                        }
+                    )
+                
                 return {
                     "result": answer,
                     "source_documents": final_docs
                 }
             else:
+                no_result_answer = "根据提供的资料，我无法找到相关信息来回答该问题。"
+                
+                # 保存对话到短期记忆
+                if use_memory and config.ENABLE_SHORT_TERM_MEMORY:
+                    memory_manager.add_conversation(
+                        question=question,
+                        answer=no_result_answer,
+                        metadata={
+                            "used_query_rewriting": True,
+                            "used_categories": categories,
+                            "memory_context_included": bool(memory_context),
+                            "source_documents_count": 0,
+                            "async_mode": True,
+                            "no_result": True
+                        }
+                    )
+                
                 return {
-                    "result": "根据提供的资料，我无法找到相关信息来回答该问题。",
+                    "result": no_result_answer,
                     "source_documents": []
                 }
         else:
-            # 使用分类检索的问答链
+            # 使用分类检索的问答链，但需要手动处理记忆上下文
             if categories:
+                print("--- 异步分类检索模式 ---")
+                
                 # 创建临时的分类检索器并异步执行
-                def create_category_qa():
+                def get_category_docs():
                     category_retriever = self._build_category_retriever(categories)
                     compression_retriever = ContextualCompressionRetriever(
                         base_compressor=self.reranker,
                         base_retriever=category_retriever
                     )
+                    return compression_retriever.get_relevant_documents(question)
+                
+                retrieved_docs = await self._run_in_executor(get_category_docs)
+                
+                if retrieved_docs:
+                    # 构建上下文
+                    context = "\n\n".join([doc.page_content for doc in retrieved_docs])
                     
-                    from langchain.chains import RetrievalQA
-                    from langchain_core.prompts import PromptTemplate
+                    # 构建完整的上下文（包含记忆上下文和检索上下文）
+                    full_context = context
+                    if memory_context:
+                        full_context = f"对话历史:\n{memory_context}\n\n当前检索到的相关信息:\n{context}"
                     
                     # 使用提示词管理器获取问答提示模板
                     qa_template = get_qa_prompt_template()
-                    prompt_template = qa_template.template
-                    QA_CHAIN_PROMPT = PromptTemplate.from_template(prompt_template)
+                    prompt = qa_template.format(context=full_context, question=question)
+                    response = await self._run_in_executor(self.llm.invoke, prompt)
                     
-                    temp_qa_chain = RetrievalQA.from_chain_type(
-                        llm=self.llm,
-                        chain_type="stuff",
-                        retriever=compression_retriever,
-                        chain_type_kwargs={"prompt": QA_CHAIN_PROMPT},
-                        return_source_documents=True
-                    )
+                    if hasattr(response, 'content'):
+                        answer = response.content.strip()
+                    else:
+                        answer = str(response).strip()
                     
-                    return temp_qa_chain.invoke({"query": question})
+                    result = {
+                        "result": answer,
+                        "source_documents": retrieved_docs
+                    }
+                else:
+                    no_result_answer = "根据提供的资料，我无法找到相关信息来回答该问题。"
+                    result = {
+                        "result": no_result_answer,
+                        "source_documents": []
+                    }
                 
-                result = await self._run_in_executor(create_category_qa)
+                # 保存对话到短期记忆
+                if use_memory and config.ENABLE_SHORT_TERM_MEMORY:
+                    memory_manager.add_conversation(
+                        question=question,
+                        answer=result.get("result", ""),
+                        metadata={
+                            "used_query_rewriting": False,
+                            "used_categories": categories,
+                            "memory_context_included": bool(memory_context),
+                            "source_documents_count": len(result.get("source_documents", [])),
+                            "async_mode": True
+                        }
+                    )
+                
                 return result
             else:
-                # 使用原始的问答链
-                result = await self._run_in_executor(
-                    self.qa_chain.invoke, {"query": question}
+                # 使用原始的问答链，但需要手动处理记忆上下文
+                print("--- 异步原始问答链模式 (ask_with_categories) ---")
+                
+                # 先获取相关文档
+                retriever = self.qa_chain.retriever
+                retrieved_docs = await self._run_in_executor(
+                    retriever.get_relevant_documents, question
                 )
+                
+                if retrieved_docs:
+                    # 构建上下文
+                    context = "\n\n".join([doc.page_content for doc in retrieved_docs])
+                    
+                    # 构建完整的上下文（包含记忆上下文和检索上下文）
+                    full_context = context
+                    if memory_context:
+                        full_context = f"对话历史:\n{memory_context}\n\n当前检索到的相关信息:\n{context}"
+                    
+                    # 使用提示词管理器获取问答提示模板
+                    qa_template = get_qa_prompt_template()
+                    prompt = qa_template.format(context=full_context, question=question)
+                    response = await self._run_in_executor(self.llm.invoke, prompt)
+                    
+                    if hasattr(response, 'content'):
+                        answer = response.content.strip()
+                    else:
+                        answer = str(response).strip()
+                    
+                    result = {
+                        "result": answer,
+                        "source_documents": retrieved_docs
+                    }
+                else:
+                    no_result_answer = "根据提供的资料，我无法找到相关信息来回答该问题。"
+                    result = {
+                        "result": no_result_answer,
+                        "source_documents": []
+                    }
+                
+                # 保存对话到短期记忆
+                if use_memory and config.ENABLE_SHORT_TERM_MEMORY:
+                    memory_manager.add_conversation(
+                        question=question,
+                        answer=result.get("result", ""),
+                        metadata={
+                            "used_query_rewriting": False,
+                            "used_categories": None,
+                            "memory_context_included": bool(memory_context),
+                            "source_documents_count": len(result.get("source_documents", [])),
+                            "async_mode": True
+                        }
+                    )
+                
                 return result
 
     async def _rewrite_query_async(self, original_query: str) -> List[str]:

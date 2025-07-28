@@ -108,18 +108,89 @@ class ShortTermMemoryManager:
         # manual策略不自动清理
     
     def _auto_cleanup(self) -> None:
-        """自动清理策略：移除最旧的对话，但保留最小轮数"""
+        """
+        自动清理策略：严格控制总长度不超过max_length
+        优先级：长度限制 > 轮数保留
+        如果单轮对话超长，会截取该轮对话的内容
+        """
         removed_count = 0
+        truncated_count = 0
         
-        while (self.total_char_length > self.max_length and 
-               len(self.conversations) > self.min_rounds):
-            
+        # 第一阶段：移除整轮对话直到满足长度要求或只剩一轮
+        while (self.total_char_length > self.max_length and len(self.conversations) > 1):
             removed_conversation = self.conversations.pop(0)
             self.total_char_length -= removed_conversation.char_length
             removed_count += 1
         
-        if removed_count > 0:
-            print(f"🧹 自动清理了 {removed_count} 轮旧对话 (当前总长度: {self.total_char_length:,} 字符)")
+        # 第二阶段：如果还是超长且只剩一轮对话，截取该轮对话
+        if self.total_char_length > self.max_length and len(self.conversations) == 1:
+            last_conversation = self.conversations[0]
+            
+            # 计算需要截取多少字符
+            excess_chars = self.total_char_length - self.max_length
+            target_length = last_conversation.char_length - excess_chars
+            
+            if target_length > 0:
+                # 按比例截取问题和答案
+                total_original_length = len(last_conversation.question) + len(last_conversation.answer)
+                question_ratio = len(last_conversation.question) / total_original_length
+                answer_ratio = len(last_conversation.answer) / total_original_length
+                
+                target_question_length = int(target_length * question_ratio)
+                target_answer_length = target_length - target_question_length
+                
+                # 截取问题和答案
+                if target_question_length > 3:  # 保留至少3个字符用于"..."
+                    truncated_question = last_conversation.question[:target_question_length-3] + "..."
+                else:
+                    truncated_question = "..."
+                
+                if target_answer_length > 3:  # 保留至少3个字符用于"..."
+                    truncated_answer = last_conversation.answer[:target_answer_length-3] + "..."
+                else:
+                    truncated_answer = "..."
+                
+                # 更新对话内容
+                old_length = last_conversation.char_length
+                last_conversation.question = truncated_question
+                last_conversation.answer = truncated_answer
+                last_conversation.char_length = len(truncated_question) + len(truncated_answer)
+                
+                # 更新总长度
+                self.total_char_length = self.total_char_length - old_length + last_conversation.char_length
+                truncated_count = 1
+                
+                print(f"⚠️  最后一轮对话过长，已截取 {old_length - last_conversation.char_length} 字符")
+            else:
+                # 如果目标长度太小，直接清空该轮对话
+                self.conversations.clear()
+                self.total_char_length = 0
+                removed_count += 1
+                print(f"⚠️  单轮对话超出限制太多，已清空所有记忆")
+        
+        # 第三阶段：如果还有多轮对话但仍超长，继续移除（理论上不应该发生）
+        while self.total_char_length > self.max_length and len(self.conversations) > 0:
+            removed_conversation = self.conversations.pop(0)
+            self.total_char_length -= removed_conversation.char_length
+            removed_count += 1
+        
+        # 输出清理结果
+        if removed_count > 0 or truncated_count > 0:
+            messages = []
+            if removed_count > 0:
+                messages.append(f"移除了 {removed_count} 轮旧对话")
+            if truncated_count > 0:
+                messages.append(f"截取了 {truncated_count} 轮对话内容")
+            
+            print(f"🧹 自动清理完成：{', '.join(messages)} (当前总长度: {self.total_char_length:,} 字符)")
+        
+        # 最终验证：确保绝对不超过限制
+        if self.total_char_length > self.max_length:
+            print(f"❌ 警告：清理后仍超出限制 ({self.total_char_length:,} > {self.max_length:,})")
+            # 紧急处理：直接清空
+            self.conversations.clear()
+            self.total_char_length = 0
+            print(f"🚨 紧急清空所有记忆以避免超出限制")
     
     def _sliding_window_cleanup(self) -> None:
         """滑动窗口清理策略：保持固定数量的对话"""
