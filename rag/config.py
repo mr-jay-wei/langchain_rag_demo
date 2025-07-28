@@ -96,6 +96,29 @@ CHUNK_SIZE: int = 500
 CHUNK_OVERLAP: int = 150
 
 
+# --- 短期记忆配置 ---
+
+# 是否启用短期记忆功能
+ENABLE_SHORT_TERM_MEMORY: bool = True
+
+# 短期记忆最大字符长度（100k字符）
+SHORT_TERM_MEMORY_MAX_LENGTH: int = 100_000
+
+# 单条对话记录的最大字符长度（防止单条记录过长）
+SINGLE_CONVERSATION_MAX_LENGTH: int = 10_000
+
+# 记忆保留的最小对话轮数（即使超过长度限制也保留最近的N轮对话）
+MIN_CONVERSATION_ROUNDS: int = 3
+
+# 记忆清理策略
+# "auto" - 自动清理最旧的记录
+# "manual" - 手动清理
+# "sliding_window" - 滑动窗口，保持固定数量的对话
+MEMORY_CLEANUP_STRATEGY: str = "auto"
+
+# 滑动窗口大小（当策略为sliding_window时使用）
+SLIDING_WINDOW_SIZE: int = 20
+
 # --- 检索与重排序配置 ---
 
 # 向量检索Top K: 从向量数据库中初步检索出的最相似文档数量

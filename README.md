@@ -31,6 +31,14 @@
 - **问题改写**：自动生成多个相关问题提高检索覆盖面
 - **分类检索**：支持按文档类别进行精准检索
 
+### 🧠 短期记忆系统
+
+- **对话历史保存**：自动保存用户问题和AI回答
+- **智能长度管理**：总字符长度不超过配置限制（默认100k字符）
+- **自动清理策略**：超出限制时自动移除最旧的对话记录
+- **上下文整合**：将对话历史与检索结果整合，AI能理解代词引用
+- **灵活配置**：支持启用/禁用、不同清理策略、最小保留轮数等
+
 ### 📊 企业级数据管理
 
 - **智能同步**：自动检测文件变化，增量更新向量数据库
@@ -55,6 +63,7 @@ rag_example/
 ├── streaming_web_demo.py         # Web演示应用
 ├── prompt_management_api.py      # 提示词管理API服务
 ├── demo_runtime_prompt_update.py # 运行时更新演示脚本
+├── demo_short_term_memory.py     # 短期记忆功能演示脚本
 ├── test_prompt_manager.py        # 提示词管理器测试
 ├── verify_prompt_decoupling.py   # 解耦验证脚本
 └── README.md                     # 项目文档
@@ -179,6 +188,82 @@ prompt_manager.reload_prompt("qa_prompt")
 
 # 保存新提示词
 prompt_manager.save_prompt("custom_prompt", "自定义提示词内容")
+```
+
+### 短期记忆功能
+
+```python
+import asyncio
+from rag.streaming_pipeline import StreamingRagPipeline
+from rag.memory_manager import memory_manager
+
+async def main():
+    rag = StreamingRagPipeline()
+    
+    # 启用记忆的对话
+    await rag.ask_stream("什么是人工智能？", use_memory=True)
+    await rag.ask_stream("它有哪些应用？", use_memory=True)  # "它"会被理解为"人工智能"
+    
+    # 查看记忆统计
+    stats = memory_manager.get_memory_stats()
+    print(f"记忆统计: {stats}")
+    
+    # 搜索对话历史
+    results = memory_manager.search_conversations("人工智能")
+    print(f"搜索结果: {len(results)} 条")
+
+asyncio.run(main())
+```
+
+## 🧠 短期记忆功能演示
+
+### 运行演示脚本
+
+```bash
+# 运行完整的短期记忆功能演示
+uv run demo_short_term_memory.py
+```
+
+**演示功能包括：**
+- ✅ 基础记忆功能：自动保存对话历史，AI能理解代词引用
+- ✅ 记忆管理：查看统计、搜索历史、获取上下文
+- ✅ 智能清理：演示长度限制和自动清理机制
+- ✅ 不同模式：对比启用/禁用记忆的效果差异
+- ✅ 上下文整合：展示记忆如何与检索结果整合
+
+### 短期记忆配置
+
+```python
+# 在 rag/config.py 中配置短期记忆
+ENABLE_SHORT_TERM_MEMORY = True           # 启用短期记忆
+SHORT_TERM_MEMORY_MAX_LENGTH = 100_000    # 最大字符长度（100k）
+MIN_CONVERSATION_ROUNDS = 3               # 最小保留轮数
+MEMORY_CLEANUP_STRATEGY = "auto"          # 清理策略：auto/manual/sliding_window
+SLIDING_WINDOW_SIZE = 20                  # 滑动窗口大小
+```
+
+### 记忆管理API
+
+```python
+from rag.memory_manager import memory_manager
+
+# 查看记忆统计
+stats = memory_manager.get_memory_stats()
+print(f"总对话轮数: {stats['total_conversations']}")
+print(f"内存使用率: {stats['memory_usage_percent']:.1f}%")
+
+# 搜索对话历史
+results = memory_manager.search_conversations("人工智能", limit=5)
+for idx, (pos, conv) in enumerate(results):
+    print(f"{idx+1}. {conv.question[:30]}...")
+
+# 导出/导入记忆
+memory_manager.export_conversations("backup.json")
+memory_manager.import_conversations("backup.json")
+
+# 手动清理记忆
+memory_manager.remove_old_conversations(keep_count=10)
+memory_manager.clear_memory()  # 清空所有记忆
 ```
 
 ## 🔧 配置说明

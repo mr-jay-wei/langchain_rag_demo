@@ -11,6 +11,8 @@ from .async_pipeline import AsyncRagPipeline
 from . import config
 # 导入提示词管理器
 from .prompt_manager import get_qa_prompt_template, get_query_rewrite_prompt_template
+# 导入短期记忆管理器
+from .memory_manager import memory_manager
 
 # 导入需要的组件
 from langchain_core.documents import Document
@@ -55,12 +57,13 @@ class StreamingRagPipeline(AsyncRagPipeline):
         super().__init__()
         print("流式RAG系统初始化完成。")
     
-    async def ask_stream(self, question: str) -> AsyncGenerator[StreamEvent, None]:
+    async def ask_stream(self, question: str, use_memory: bool = True) -> AsyncGenerator[StreamEvent, None]:
         """
-        流式问答 - 只有答案生成是流式的
+        流式问答 - 只有答案生成是流式的，支持短期记忆功能
         
         Args:
             question: 用户问题
+            use_memory: 是否使用短期记忆功能
             
         Yields:
             StreamEvent: 流式事件
@@ -136,7 +139,7 @@ class StreamingRagPipeline(AsyncRagPipeline):
                     yield event
             else:
                 # 没有找到相关文档
-                async for event in self._stream_no_result_answer():
+                async for event in self._stream_no_result_answer(question, use_memory):
                     yield event
             
             # 3. 完成
@@ -265,7 +268,7 @@ class StreamingRagPipeline(AsyncRagPipeline):
                 async for event in self._generate_streaming_answer(question, final_docs):
                     yield event
             else:
-                async for event in self._stream_no_result_answer():
+                async for event in self._stream_no_result_answer(question, True):
                     yield event
             
             yield StreamEvent(
@@ -281,13 +284,14 @@ class StreamingRagPipeline(AsyncRagPipeline):
                 timestamp=time.time()
             )
     
-    async def _generate_streaming_answer(self, question: str, documents: List[Document]) -> AsyncGenerator[StreamEvent, None]:
+    async def _generate_streaming_answer(self, question: str, documents: List[Document], use_memory: bool = True) -> AsyncGenerator[StreamEvent, None]:
         """
-        生成流式答案 - 真正的流式输出实现
+        生成流式答案 - 真正的流式输出实现，支持短期记忆功能
         
         Args:
             question: 问题
             documents: 相关文档
+            use_memory: 是否使用短期记忆功能
             
         Yields:
             StreamEvent: 流式事件
@@ -302,22 +306,37 @@ class StreamingRagPipeline(AsyncRagPipeline):
             # 构建上下文
             context = "\n\n".join([doc.page_content for doc in documents])
             
+            # 获取短期记忆上下文
+            memory_context = ""
+            if use_memory and config.ENABLE_SHORT_TERM_MEMORY:
+                memory_context = memory_manager.get_conversation_context(include_count=5)
+            
+            # 构建完整的上下文（包含记忆上下文和检索上下文）
+            full_context = context
+            if memory_context:
+                full_context = f"对话历史:\n{memory_context}\n\n当前检索到的相关信息:\n{context}"
+            
             # 构建提示
             # 使用提示词管理器获取问答提示模板
             qa_template = get_qa_prompt_template()
-            prompt = qa_template.format(context=context, question=question)
+            prompt = qa_template.format(context=full_context, question=question)
+            
+            # 收集完整答案用于保存到记忆
+            complete_answer = ""
             
             # ✅ 关键改进：检查LLM是否支持流式调用
             if hasattr(self.llm, 'astream'):
                 # 真正的流式LLM调用
                 async for chunk in self.llm.astream(prompt):
                     if hasattr(chunk, 'content') and chunk.content:
+                        complete_answer += chunk.content
                         yield StreamEvent(
                             type=StreamEventType.GENERATION_CHUNK,
                             data={"chunk": chunk.content},
                             timestamp=time.time()
                         )
                     elif isinstance(chunk, str) and chunk:
+                        complete_answer += chunk
                         yield StreamEvent(
                             type=StreamEventType.GENERATION_CHUNK,
                             data={"chunk": chunk},
@@ -332,9 +351,23 @@ class StreamingRagPipeline(AsyncRagPipeline):
                 else:
                     answer = str(response).strip()
                 
+                complete_answer = answer
+                
                 # 流式输出已有答案
                 async for event in self._stream_text(answer):
                     yield event
+            
+            # 保存对话到短期记忆
+            if use_memory and config.ENABLE_SHORT_TERM_MEMORY and complete_answer:
+                memory_manager.add_conversation(
+                    question=question,
+                    answer=complete_answer.strip(),
+                    metadata={
+                        "source_documents_count": len(documents),
+                        "memory_context_included": bool(memory_context),
+                        "streaming_mode": True
+                    }
+                )
             
             # 生成结束，提供源文档信息
             yield StreamEvent(
@@ -560,13 +593,31 @@ class StreamingRagPipeline(AsyncRagPipeline):
         
         return events
     
-    async def _stream_no_result_answer(self) -> AsyncGenerator[StreamEvent, None]:
+    async def _stream_no_result_answer(self, question: str = "", use_memory: bool = True) -> AsyncGenerator[StreamEvent, None]:
         """
         流式输出"无结果"的标准答案
+        
+        Args:
+            question: 用户问题（用于保存到记忆）
+            use_memory: 是否使用短期记忆功能
         
         Yields:
             StreamEvent: 流式事件
         """
         no_result_message = "根据提供的资料，我无法找到相关信息来回答该问题。"
+        
+        # 保存对话到短期记忆
+        if use_memory and config.ENABLE_SHORT_TERM_MEMORY and question:
+            memory_manager.add_conversation(
+                question=question,
+                answer=no_result_message,
+                metadata={
+                    "source_documents_count": 0,
+                    "memory_context_included": False,
+                    "streaming_mode": True,
+                    "no_result": True
+                }
+            )
+        
         async for event in self._stream_existing_answer(no_result_message):
             yield event

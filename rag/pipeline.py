@@ -44,6 +44,8 @@ import jieba  # 中文分词库
 from . import config
 # 导入提示词管理器
 from .prompt_manager import get_qa_prompt_template, get_query_rewrite_prompt_template
+# 导入短期记忆管理器
+from .memory_manager import memory_manager
 
 
 class RagPipeline:
@@ -94,12 +96,12 @@ class RagPipeline:
 
     def _setup_llm(self):
         """加载大语言模型配置。"""
-        # api_key = os.getenv("CLOUD_INFINI_API_KEY")
-        # base_url = os.getenv("CLOUD_BASE_URL")
-        # model_name = os.getenv("CLOUD_MODEL_NAME")
-        api_key = os.getenv("DeepSeek_api_key")
-        base_url = os.getenv("DeepSeek_base_url")
-        model_name = os.getenv("DeepSeek_model_name")
+        api_key = os.getenv("CLOUD_INFINI_API_KEY")
+        base_url = os.getenv("CLOUD_BASE_URL")
+        model_name = os.getenv("CLOUD_MODEL_NAME")
+        # api_key = os.getenv("DeepSeek_api_key")
+        # base_url = os.getenv("DeepSeek_base_url")
+        # model_name = os.getenv("DeepSeek_model_name")
         if not all([api_key, base_url, model_name]):
             raise ValueError(
                 "API密钥或模型配置未找到。请检查您的 .env 文件是否包含 "
@@ -1332,24 +1334,34 @@ class RagPipeline:
         print(f"  - 多查询检索完成，共获得 {len(all_documents)} 个文档")
         return all_documents
 
-    def ask(self, question: str) -> Dict[str, Any]:
+    def ask(self, question: str, use_memory: bool = True) -> Dict[str, Any]:
         """
         对已加载的文档提出问题，并获取答案。
-        支持问题改写功能，提高搜索覆盖面。
+        支持问题改写功能和短期记忆功能，提高搜索覆盖面。
 
         Args:
             question: 用户提出的问题字符串。
+            use_memory: 是否使用短期记忆功能
 
         Returns:
             一个字典，包含'result' (答案) 和 'source_documents' (参考的文档片段)。
         """
         if not self.qa_chain:
+            error_msg = "错误: 问答链尚未初始化。请先调用 `sync_data_directory` 方法加载文档。"
             return {
-                "result": "错误: 问答链尚未初始化。请先调用 `sync_data_directory` 方法加载文档。",
+                "result": error_msg,
                 "source_documents": []
             }
         
         print(f"\n正在处理问题: '{question}'...")
+        
+        # 获取短期记忆上下文
+        memory_context = ""
+        if use_memory and config.ENABLE_SHORT_TERM_MEMORY:
+            memory_context = memory_manager.get_conversation_context(include_count=5)  # 包含最近5轮对话
+            if memory_context:
+                print("--- 短期记忆上下文 ---")
+                print(f"包含最近 {len(memory_manager.get_recent_conversations(5))} 轮对话作为上下文")
         
         # 如果启用了问题改写功能
         if config.ENABLE_QUERY_REWRITING:
@@ -1404,4 +1416,17 @@ class RagPipeline:
         else:
             # 使用原始的问答链
             result = self.qa_chain.invoke({"query": question})
+            
+            # 保存对话到短期记忆
+            if use_memory and config.ENABLE_SHORT_TERM_MEMORY:
+                memory_manager.add_conversation(
+                    question=question,
+                    answer=result.get("result", ""),
+                    metadata={
+                        "used_query_rewriting": False,
+                        "memory_context_included": bool(memory_context),
+                        "source_documents_count": len(result.get("source_documents", []))
+                    }
+                )
+            
             return result

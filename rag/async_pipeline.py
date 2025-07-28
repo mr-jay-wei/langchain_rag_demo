@@ -11,6 +11,8 @@ from .pipeline import RagPipeline
 from . import config
 # 导入提示词管理器
 from .prompt_manager import get_qa_prompt_template, get_query_rewrite_prompt_template
+# 导入短期记忆管理器
+from .memory_manager import memory_manager
 
 # 导入需要的组件
 from langchain_community.document_loaders import TextLoader
@@ -444,7 +446,7 @@ class AsyncRagPipeline(RagPipeline):
         
         await self._run_in_executor(rebuild_sync)
 
-    async def ask_async(self, question: str) -> Dict[str, Any]:
+    async def ask_async(self, question: str, use_memory: bool = True) -> Dict[str, Any]:
         """
         异步版本的问答功能。
         支持问题改写功能，提高搜索覆盖面。
