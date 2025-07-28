@@ -24,6 +24,13 @@
 - **异步模式**：`AsyncRagPipeline` - 高并发异步处理
 - **流式模式**：`StreamingRagPipeline` - 实时流式响应
 
+### 🧠 智能回答来源识别
+
+- **知识库回答**：`"根据知识库资料："` + 基于检索文档的精准回答
+- **大模型知识回答**：`"知识库资料未检索到内容，使用大模型训练知识回复："` + 基于训练知识的通用回答
+- **无法回答**：`"根据提供的资料，我无法回答该问题。"` - 对于预测类、隐私类等无法回答的问题
+- **智能判断**：系统自动判断回答来源，为用户提供透明的信息来源标识
+
 ### 🔍 智能检索系统
 
 - **混合检索**：向量检索 + BM25 关键字检索
@@ -33,10 +40,10 @@
 
 ### 🧠 短期记忆系统
 
-- **对话历史保存**：自动保存用户问题和AI回答
-- **智能长度管理**：总字符长度不超过配置限制（默认100k字符）
+- **对话历史保存**：自动保存用户问题和 AI 回答
+- **智能长度管理**：总字符长度不超过配置限制（默认 100k 字符）
 - **自动清理策略**：超出限制时自动移除最旧的对话记录
-- **上下文整合**：将对话历史与检索结果整合，AI能理解代词引用
+- **上下文整合**：将对话历史与检索结果整合，AI 能理解代词引用
 - **灵活配置**：支持启用/禁用、不同清理策略、最小保留轮数等
 
 ### 📊 企业级数据管理
@@ -50,23 +57,29 @@
 
 ```
 rag_example/
-├── rag/                          # 核心RAG模块
-│   ├── prompts/                  # 提示词管理
-│   │   ├── qa_prompt.txt         # 问答提示词
-│   │   ├── query_rewrite_prompt.txt # 问题改写提示词
-│   │   └── README.md             # 提示词使用说明
-│   ├── config.py                 # 系统配置
-│   ├── prompt_manager.py         # 提示词管理器
-│   ├── pipeline.py               # 同步RAG流程
-│   ├── async_pipeline.py         # 异步RAG流程
-│   └── streaming_pipeline.py     # 流式RAG流程
-├── streaming_web_demo.py         # Web演示应用
-├── prompt_management_api.py      # 提示词管理API服务
-├── demo_runtime_prompt_update.py # 运行时更新演示脚本
-├── demo_short_term_memory.py     # 短期记忆功能演示脚本
-├── test_prompt_manager.py        # 提示词管理器测试
-├── verify_prompt_decoupling.py   # 解耦验证脚本
-└── README.md                     # 项目文档
+├── rag
+│   ├── prompts
+│   │   ├── qa_prompt.txt
+│   │   ├── query_rewrite_prompt.txt
+│   │   └── README.md
+│   ├── __init__.py
+│   ├── async_pipeline.py
+│   ├── config.py
+│   ├── hot_reload_manager.py
+│   ├── memory_manager.py
+│   ├── pipeline.py
+│   ├── prompt_manager.py
+│   └── streaming_pipeline.py
+├── .env_example
+├── .gitignore
+├── .python-version
+├── async_main.py
+├── main.py
+├── pyproject.toml
+├── README.md
+├── sse_api_server.py
+├── streaming_main.py
+└── streaming_web_demo.py
 ```
 
 ## 🚀 快速开始
@@ -81,9 +94,9 @@ uv sync
 uv pip install -r requirements.txt
 
 # 配置环境变量（创建 .env 文件）
-DeepSeek_api_key=your_api_key_here
-DeepSeek_base_url=https://api.deepseek.com
-DeepSeek_model_name=deepseek-chat
+CLOUD_INFINI_API_KEY=your_api_key_here
+CLOUD_BASE_URL=https://cloud.infini-ai.com/maas/v1/
+CLOUD_MODEL_NAME=deepseek-chat
 ```
 
 ### 2. 数据准备
@@ -164,6 +177,47 @@ async def main():
 asyncio.run(main())
 ```
 
+### 智能回答来源识别示例
+
+```python
+import asyncio
+from rag.streaming_pipeline import StreamingRagPipeline
+
+async def demo_answer_sources():
+    rag = StreamingRagPipeline()
+
+    # 测试不同类型的问题
+    test_cases = [
+        {
+            "question": "什么是Python？",
+            "expected": "根据知识库资料：",
+            "description": "知识库中有相关文档"
+        },
+        {
+            "question": "埃及有多少座金字塔？",
+            "expected": "知识库资料未检索到内容，使用大模型训练知识回复：",
+            "description": "知识库无关但大模型知道"
+        },
+        {
+            "question": "请帮我预测明天的彩票号码",
+            "expected": "根据提供的资料，我无法回答该问题。",
+            "description": "大模型也无法回答"
+        }
+    ]
+
+    for case in test_cases:
+        print(f"\n问题: {case['question']}")
+        print(f"说明: {case['description']}")
+        print("回答: ", end="")
+
+        async for event in rag.ask_stream(case['question']):
+            if event.type.value == "generation_chunk":
+                print(event.data["chunk"], end="", flush=True)
+        print("\n" + "-" * 50)
+
+asyncio.run(demo_answer_sources())
+```
+
 ### 分类检索
 
 ```python
@@ -199,15 +253,15 @@ from rag.memory_manager import memory_manager
 
 async def main():
     rag = StreamingRagPipeline()
-    
+
     # 启用记忆的对话
     await rag.ask_stream("什么是人工智能？", use_memory=True)
     await rag.ask_stream("它有哪些应用？", use_memory=True)  # "它"会被理解为"人工智能"
-    
+
     # 查看记忆统计
     stats = memory_manager.get_memory_stats()
     print(f"记忆统计: {stats}")
-    
+
     # 搜索对话历史
     results = memory_manager.search_conversations("人工智能")
     print(f"搜索结果: {len(results)} 条")
@@ -225,7 +279,8 @@ uv run demo_short_term_memory.py
 ```
 
 **演示功能包括：**
-- ✅ 基础记忆功能：自动保存对话历史，AI能理解代词引用
+
+- ✅ 基础记忆功能：自动保存对话历史，AI 能理解代词引用
 - ✅ 记忆管理：查看统计、搜索历史、获取上下文
 - ✅ 智能清理：演示长度限制和自动清理机制
 - ✅ 不同模式：对比启用/禁用记忆的效果差异
@@ -237,12 +292,12 @@ uv run demo_short_term_memory.py
 # 在 rag/config.py 中配置短期记忆
 ENABLE_SHORT_TERM_MEMORY = True           # 启用短期记忆
 SHORT_TERM_MEMORY_MAX_LENGTH = 100_000    # 最大字符长度（100k）
-MIN_CONVERSATION_ROUNDS = 3               # 最小保留轮数
+MIN_CONVERSATION_ROUNDS = 1               # 最小保留轮数
 MEMORY_CLEANUP_STRATEGY = "auto"          # 清理策略：auto/manual/sliding_window
 SLIDING_WINDOW_SIZE = 20                  # 滑动窗口大小
 ```
 
-### 记忆管理API
+### 记忆管理 API
 
 ```python
 from rag.memory_manager import memory_manager
@@ -341,68 +396,11 @@ uv run demo_runtime_prompt_update.py
 - ✅ 演示手动重载功能
 - ✅ 自动恢复原始提示词
 
-### Web 管理界面
-
-```bash
-# 启动提示词管理API服务
-uv run prompt_management_api.py
-
-# 访问管理界面: http://localhost:8001
-# API文档: http://localhost:8001/docs
-```
-
-**Web 界面功能：**
-
-- 🎯 **可视化管理**：查看所有提示词的状态和内容
-- ✏️ **在线编辑**：直接在 Web 界面编辑提示词
-- 💾 **实时保存**：保存后立即生效，无需重启服务
-- 🔄 **重载功能**：手动重载单个或所有提示词
-- ✅ **验证功能**：检查提示词格式和变量
-- ➕ **创建新提示词**：在线创建新的提示词文件
-- 📋 **更新历史**：查看所有更新操作记录
-
-### API 接口使用
-
-```bash
-# 获取所有提示词
-curl http://localhost:8001/api/prompts
-
-# 获取特定提示词
-curl http://localhost:8001/api/prompts/qa_prompt
-
-# 更新提示词
-curl -X PUT http://localhost:8001/api/prompts/qa_prompt \
-  -H "Content-Type: application/json" \
-  -d '{"content": "新的提示词内容 {context} {question}", "description": "API更新"}'
-
-# 重载提示词
-curl -X POST http://localhost:8001/api/prompts/qa_prompt/reload
-
-# 验证提示词
-curl http://localhost:8001/api/prompts/qa_prompt/validate
-
-# 批量重载所有提示词
-curl -X POST http://localhost:8001/api/prompts/reload-all
-```
 
 ### 实际应用场景
 
-#### 场景 1：同时运行 RAG 服务和管理界面
 
-```bash
-# 终端1：启动RAG Web演示
-uv run streaming_web_demo.py &
-
-# 终端2：启动提示词管理
-uv run prompt_management_api.py
-
-# 现在你可以：
-# 1. 在 http://localhost:8000 测试问答效果
-# 2. 在 http://localhost:8001 修改提示词
-# 3. 修改后立即在问答界面看到效果变化
-```
-
-#### 场景 2：A/B 测试不同提示词
+#### 场景 1：A/B 测试不同提示词
 
 ```python
 # 创建测试脚本 test_prompts.py
@@ -438,6 +436,71 @@ uv run test_prompt_manager.py
 
 # 验证提示词解耦
 uv run verify_prompt_decoupling.py
+
+# 测试智能回答来源识别功能
+uv run test/test_answer_sources.py
+```
+
+### 智能回答来源识别测试
+
+```bash
+# 运行完整的回答来源测试
+uv run test/test_answer_sources.py
+```
+
+**测试覆盖场景：**
+
+1. **知识库相关问题** ✅
+
+   - 问题：`"什么是Python？"`
+   - 期望前缀：`"根据知识库资料："`
+   - 验证：系统能从知识库找到相关文档并基于文档回答
+
+2. **知识库无关但常识问题** ✅
+
+   - 问题：`"埃及有多少座金字塔？"`
+   - 期望前缀：`"知识库资料未检索到内容，使用大模型训练知识回复："`
+   - 验证：知识库无相关内容时，使用大模型训练知识回答
+
+3. **完全无法回答的问题** ✅
+   - 问题：`"请帮我预测明天的彩票号码"`
+   - 期望回复：`"根据提供的资料，我无法回答该问题。"`
+   - 验证：对于预测类、隐私类问题，系统明确表示无法回答
+
+**测试输出示例：**
+
+```
+🧪 测试不同回答来源的功能
+============================================================
+
+1. 测试: 知识库相关问题
+   问题: 什么是Python？
+   期望前缀: 根据知识库资料：
+   --------------------------------------------------
+   🚀 基于知识库文档生成答案
+   根据知识库资料：Python是一种高级编程语言，具有简洁的语法和强大的功能...
+   ✅ 前缀正确: 包含 '根据知识库资料：'
+   🎯 测试结果: ✅ 通过
+
+2. 测试: 知识库无关但常识问题
+   问题: 埃及有多少座金字塔？
+   期望前缀: 知识库资料未检索到内容，使用大模型训练知识回复：
+   --------------------------------------------------
+   🚀 知识库未找到相关资料，使用大模型训练知识回答
+   知识库资料未检索到内容，使用大模型训练知识回复：埃及现存已知的金字塔数量约为118至138座...
+   ✅ 前缀正确: 包含 '知识库资料未检索到内容，使用大模型训练知识回复：'
+   🎯 测试结果: ✅ 通过
+
+3. 测试: 完全无关的问题
+   问题: 请帮我预测明天的彩票号码
+   期望前缀: 根据提供的资料，我无法回答该问题。
+   --------------------------------------------------
+   🚀 知识库未找到相关资料，使用大模型训练知识回答
+   根据提供的资料，我无法回答该问题。
+   ✅ 前缀正确: 包含 '根据提供的资料，我无法回答该问题。'
+   🎯 测试结果: ✅ 通过
+
+🎉 所有测试完成！
 ```
 
 ### 性能测试
@@ -627,7 +690,7 @@ class StreamEventType(Enum):
 
 ## 📄 许可证
 
-本项目采用 MIT 许可证 - 查看 [LICENSE](LICENSE) 文件了解详情。
+本项目采用 Apache 2.0 许可证 - 查看 [LICENSE](LICENSE) 文件了解详情。
 
 ## 🙏 致谢
 
@@ -640,10 +703,12 @@ class StreamEventType(Enum):
 
 如有问题或建议，请通过以下方式联系：
 
-- 📧 Email: [your-email@example.com]
-- 🐛 Issues: [GitHub Issues](https://github.com/your-repo/issues)
-- 💬 Discussions: [GitHub Discussions](https://github.com/your-repo/discussions)
+- 📧 Email: [xiaofeng.0209@gmail.com]
+- 🐛 Issues: [GitHub Issues](https://github.com/mr-jay-wei/langchain_rag_demo)
+- 💬 Discussions: [GitHub Discussions](https://github.com/mr-jay-wei/langchain_rag_demo)
 
 ---
 
 ⭐ 如果这个项目对您有帮助，请给我们一个星标！
+如果要打赏，请打赏：
+![alt text]({054CB209-A3AE-4CA3-90D2-419E20414EA4}.png)

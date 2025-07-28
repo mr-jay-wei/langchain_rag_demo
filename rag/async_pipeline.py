@@ -540,7 +540,7 @@ class AsyncRagPipeline(RagPipeline):
                     "source_documents": final_docs
                 }
             else:
-                no_result_answer = "根据提供的资料，我无法找到相关信息来回答该问题。"
+                no_result_answer = "根据提供的资料，我无法回答该问题。"
                 
                 # 保存对话到短期记忆
                 if use_memory and config.ENABLE_SHORT_TERM_MEMORY:
@@ -593,7 +593,7 @@ class AsyncRagPipeline(RagPipeline):
                     "source_documents": retrieved_docs
                 }
             else:
-                no_result_answer = "根据提供的资料，我无法找到相关信息来回答该问题。"
+                no_result_answer = "根据提供的资料，我无法回答该问题。"
                 result = {
                     "result": no_result_answer,
                     "source_documents": []
@@ -716,7 +716,7 @@ class AsyncRagPipeline(RagPipeline):
                     "source_documents": final_docs
                 }
             else:
-                no_result_answer = "根据提供的资料，我无法找到相关信息来回答该问题。"
+                no_result_answer = "根据提供的资料，我无法回答该问题。"
                 
                 # 保存对话到短期记忆
                 if use_memory and config.ENABLE_SHORT_TERM_MEMORY:
@@ -777,7 +777,7 @@ class AsyncRagPipeline(RagPipeline):
                         "source_documents": retrieved_docs
                     }
                 else:
-                    no_result_answer = "根据提供的资料，我无法找到相关信息来回答该问题。"
+                    no_result_answer = "根据提供的资料，我无法回答该问题。"
                     result = {
                         "result": no_result_answer,
                         "source_documents": []
@@ -832,7 +832,7 @@ class AsyncRagPipeline(RagPipeline):
                         "source_documents": retrieved_docs
                     }
                 else:
-                    no_result_answer = "根据提供的资料，我无法找到相关信息来回答该问题。"
+                    no_result_answer = "根据提供的资料，我无法回答该问题。"
                     result = {
                         "result": no_result_answer,
                         "source_documents": []
